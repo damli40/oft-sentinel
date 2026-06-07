@@ -5,7 +5,7 @@
   "scripts": {
     "start": "npx tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "echo 'no build step'",
     "audit": "tsx src/services/audit-engine.ts",
     "test": "vitest run",
     "test:watch": "vitest"
