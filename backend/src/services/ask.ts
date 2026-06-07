@@ -1,0 +1,79 @@
+import { getWatched } from "./sentinel.js";
+import { getSnapshot } from "./snapshot-store.js";
+import { assessSnapshot } from "./drift.js";
+
+const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
+
+export async function askCopilot(question: string): Promise<{ answer: string; relevantOfts: string[] }> {
+  const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+
+  const watched = await getWatched();
+  const assessments = await Promise.all(
+    watched.map(async (w) => {
+      const snap = getSnapshot(w.address, w.chainId);
+      if (!snap) return null;
+      const a = await assessSnapshot(snap, w.ticker);
+      return { ticker: w.ticker, address: w.address, score: a.score, riskLevel: a.riskLevel, findings: a.findings };
+    }),
+  );
+
+  const assessed = assessments.filter(Boolean);
+  const context = assessed.map((a) => {
+    if (!a) return "";
+    const findingsSummary = a.findings.map((f) => `[${f.severity}] ${f.detail}`).join(" | ");
+    return `${a.ticker} (${a.address.slice(0, 10)}…): score=${a.score}, risk=${a.riskLevel}. Findings: ${findingsSummary || "none"}`;
+  }).join("\n");
+
+  const systemPrompt = `You are OFT Sentinel's Security Copilot — an expert on LayerZero V2 security, DVN configurations, and cross-chain bridge risks on Mantle.
+
+Current fleet (${watched.length} OFTs on Mantle mainnet, chain 5000):
+${context || "(no snapshots yet — poll in progress)"}
+
+Key facts:
+- DVN = Decentralized Verification Network: the security checker that verifies each cross-chain message is genuine
+- 1-of-1 DVN = single point of failure (the Kelp rsETH exploit pattern that drained $292M in April 2026)
+- Score 0-25 = CRITICAL (immediately exploitable), 26-84 = AT_RISK, 85-100 = PASS
+- OFT Sentinel writes cryptographic verdicts to AuditRegistry on Mantle Sepolia on every drift event
+
+Rules:
+- Answer using ONLY the fleet data above. Never invent statistics, scores, or addresses.
+- Be direct and specific: name the OFTs, their scores, and exact findings.
+- Explain technical terms (DVN, ULN, EID, OFT) in plain language when first used.
+- Keep answers under 300 words.
+- If you cannot answer from the available data, say so explicitly.`;
+
+  if (!DEEPSEEK_API_KEY) {
+    // Fallback: deterministic answer from fleet data without LLM
+    const critical = assessed.filter((a) => a?.riskLevel === "CRITICAL");
+    const worstScore = assessed.reduce((min, a) => (a && a.score < min ? a.score : min), 100);
+    const worst = assessed.find((a) => a?.score === worstScore);
+    const fallback = critical.length > 0
+      ? `Based on live data: ${critical.length} CRITICAL OFT(s) detected — ${critical.map((a) => a!.ticker).join(", ")}. ${worst ? `Lowest score: ${worst.ticker} at ${worst.score}/100.` : ""} DEEPSEEK_API_KEY is not configured — install it for full AI analysis.`
+      : `All ${assessed.length} assessed OFTs are AT_RISK or better. DEEPSEEK_API_KEY is not configured — install it for full AI analysis.`;
+    return { answer: fallback, relevantOfts: critical.map((a) => a!.ticker) };
+  }
+
+  const res = await fetch(DEEPSEEK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      temperature: 0.2,
+      max_tokens: 450,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: question },
+      ],
+    }),
+  });
+
+  if (!res.ok) throw new Error(`DeepSeek API error: ${res.status} ${await res.text()}`);
+  const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+  const answer = json.choices?.[0]?.message?.content ?? "No response from DeepSeek.";
+
+  const relevantOfts = watched
+    .filter((w) => answer.toLowerCase().includes(w.ticker.toLowerCase()))
+    .map((w) => w.ticker);
+
+  return { answer, relevantOfts };
+}

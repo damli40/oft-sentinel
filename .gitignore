@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Environment — .env.example is intentionally NOT ignored
+.env
+.env.local
+.env.*.local
+
+# Circle SDK recovery file — must never be committed
+*-recovery-file.json
+*recovery*.json
+entity-ciphertext.txt
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Sentinel runtime data — verdict ledger + score history (may contain signed tx hashes)
+backend/data/
+
+# Internal docs — keep README.md only
+*.md
+!README.md
+
+# Logs
+*.log
+npm-debug.log*
+
+# macOS
+.DS_Store

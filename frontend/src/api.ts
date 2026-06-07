@@ -1,0 +1,159 @@
+const BASE = (import.meta.env.VITE_API_URL ?? "") + "/api";
+
+export interface MantleOft {
+  ticker: string;
+  project: string;
+  oftName: string;
+  messages: number;
+  usdVolume: number;
+  messagesFromMantle: number;
+  messagesToMantle: number;
+}
+
+export interface MantleOftsResponse {
+  queryId: string;
+  source: string;
+  count: number;
+  ofts: MantleOft[];
+}
+
+export async function getMantleOfts(): Promise<MantleOftsResponse> {
+  const res = await fetch(`${BASE}/mantle/ofts`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Failed to load Mantle OFTs");
+  }
+  return res.json();
+}
+
+// ── Sentinel ──────────────────────────────────────────────────────────────
+
+export interface SentinelVerdict {
+  oft: string;
+  chainId: number;
+  ticker: string;
+  score: number;
+  riskLevel: "PASS" | "AT_RISK" | "CRITICAL";
+  verdict: string;
+  reasons: string[];
+  verdictHash: string;
+  attestationId?: string;
+  attestTxHash?: string;
+  alertTxHash?: string;
+  capturedAt: number;
+}
+
+export interface WatchedStatus {
+  ticker: string;
+  address: string;
+  chainId: number;
+  lastSnapshotAt: number | null;
+  assessment: { score: number; riskLevel: "PASS" | "AT_RISK" | "CRITICAL" } | null;
+  latestVerdict: SentinelVerdict | null;
+  dvnSummary: { requiredCount: number; requiredDVNs: string[] } | null;
+  dvnNames: Record<string, string> | null;
+}
+
+export interface SentinelStatus {
+  watched: WatchedStatus[];
+  msi: number | null;
+  msiBreakdown: { critical: number; atRisk: number; safe: number; unassessed: number } | null;
+  registry?: string;
+  alertBus?: string;
+}
+
+export interface HistoryEntry {
+  score: number;
+  riskLevel: string;
+  capturedAt: number;
+}
+
+export interface FeedEvent {
+  type: "drift" | "attest" | "poll";
+  ticker: string;
+  detail: string;
+  timestamp: number;
+  score?: number;
+  riskLevel?: string;
+  txHash?: string;
+}
+
+export async function getSentinelStatus(): Promise<SentinelStatus> {
+  const res = await fetch(`${BASE}/sentinel/status`);
+  if (!res.ok) throw new Error("Failed to load Sentinel status");
+  return res.json();
+}
+
+export async function getSentinelVerdicts(): Promise<SentinelVerdict[]> {
+  const res = await fetch(`${BASE}/sentinel/verdicts`);
+  if (!res.ok) throw new Error("Failed to load verdicts");
+  return (await res.json()).verdicts ?? [];
+}
+
+export async function runKelpReplay(ticker: string): Promise<SentinelVerdict> {
+  const res = await fetch(`${BASE}/sentinel/replay-kelp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticker }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Kelp replay failed");
+  }
+  return (await res.json()).verdict;
+}
+
+export async function pollSentinel(): Promise<void> {
+  const res = await fetch(`${BASE}/sentinel/poll`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Poll failed");
+  }
+}
+
+export async function getReport(address: string): Promise<{ ticker: string; markdown: string }> {
+  const res = await fetch(`${BASE}/sentinel/report/${address}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Report generation failed");
+  }
+  return res.json();
+}
+
+export async function runLibraryRevertReplay(ticker: string): Promise<SentinelVerdict> {
+  const res = await fetch(`${BASE}/sentinel/replay-library-revert`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticker }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Library revert replay failed");
+  }
+  return (await res.json()).verdict;
+}
+
+export async function getOftHistory(address: string): Promise<HistoryEntry[]> {
+  const res = await fetch(`${BASE}/sentinel/history/${address}`);
+  if (!res.ok) return [];
+  return (await res.json()).history ?? [];
+}
+
+export async function getFeed(): Promise<FeedEvent[]> {
+  const res = await fetch(`${BASE}/sentinel/feed`);
+  if (!res.ok) return [];
+  return (await res.json()).events ?? [];
+}
+
+export async function askSecurityCopilot(question: string): Promise<{ answer: string; relevantOfts: string[] }> {
+  const res = await fetch(`${BASE}/sentinel/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Copilot request failed");
+  }
+  return res.json();
+}
