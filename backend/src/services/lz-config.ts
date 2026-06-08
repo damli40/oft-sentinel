@@ -141,7 +141,6 @@ const FRIENDLY_DVN: Record<string, string> = {
   "MantleCross": "MantleCross DVN",
   // LZDeadDVN is intentionally left as-is — it's a named LZ contract, not a generic label.
   // Any OFT route listing it as a required DVN is permanently message-blocked (null verifier).
-  "TSS":         "TSS (Threshold Signature)",
   "StablecoinX": "StablecoinX",
   "Mantle Bank": "Mantle Bank DVN",
 };
