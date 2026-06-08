@@ -3,7 +3,7 @@ import { readSnapshot } from "./lz-config.js";
 import { assessSnapshot } from "./drift.js";
 import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
 import { putSnapshot, appendScoreHistory } from "./snapshot-store.js";
-import { getSentinelWatchlist } from "./dune.js";
+import { getMantleOfts } from "./dune.js";
 
 const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
@@ -17,17 +17,26 @@ const KELP_DEMO_OFT: WatchedOft = {
   chainId: MANTLE_CHAIN_ID,
 };
 
-// Watchlist: OFTs with 10+ messages in the past 7 days from the sentinel Dune query.
-// Dormant and test contracts are excluded before they reach the polling loop.
+// Watchlist: all-time OFTs with ≥$1M USD volume from the leaderboard query.
+// Low-volume and test contracts are excluded before they reach the polling loop.
+const WATCHLIST_MIN_VOLUME = 1_000_000;
 let watchedCache: { at: number; list: WatchedOft[] } | null = null;
 const WATCHED_TTL = 10 * 60_000;
 
 export async function getWatched(force = false): Promise<WatchedOft[]> {
   if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL)
     return [...watchedCache.list, KELP_DEMO_OFT];
-  const ofts = await getSentinelWatchlist(force).catch(() => []);
+  const ofts = await getMantleOfts(force).catch(() => []);
+  const seen = new Set<string>();
   const list = ofts
-    .filter((o) => o.address && /^0x[0-9a-fA-F]{40}$/.test(o.address))
+    .filter((o) => {
+      if (!o.address || !/^0x[0-9a-fA-F]{40}$/.test(o.address)) return false;
+      if (o.usdVolume < WATCHLIST_MIN_VOLUME) return false;
+      const key = o.address.toLowerCase();
+      if (seen.has(key)) return false; // skip duplicate contract addresses (e.g. USDT/USDT0)
+      seen.add(key);
+      return true;
+    })
     .map((o) => ({ ticker: o.ticker, address: o.address as string, chainId: MANTLE_CHAIN_ID }));
   if (list.length) watchedCache = { at: Date.now(), list };
   // DEMO is always appended — not in Dune, not polled, used only for replay.
@@ -59,11 +68,11 @@ export async function pollOnce(): Promise<void> {
       try {
         const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
         // Record score history on every poll cycle.
-        const { score, riskLevel, findings } = await assessSnapshot(snap, w.ticker);
+        const { score, riskLevel, findings, tis } = await assessSnapshot(snap, w.ticker);
         appendScoreHistory({ oft: w.address, chainId: w.chainId, score, riskLevel, capturedAt: snap.capturedAt });
-        // Attest + alert for persistently weak configs (score < 50) on every poll.
-        if (score < 50) {
-          await produceWeakConfigAttestation(w, snap, findings, score, riskLevel);
+        // Attest + alert for persistently CRITICAL configs (once per boot, not on every poll).
+        if (riskLevel === "CRITICAL") {
+          await produceWeakConfigAttestation(w, snap, findings, score, riskLevel, tis);
         }
         await runCheck(w, snap);
       } catch (e: any) {
@@ -181,5 +190,30 @@ export async function runLibraryRevertReplay(): Promise<SentinelVerdict> {
   const drifted = makeSnapshotLibRevert(w.address, w.chainId);
   const verdict = await runCheck(w, drifted);
   if (!verdict) throw new Error("Library revert replay did not trigger drift — check baseline seeding");
+  return verdict;
+}
+
+// ── Demo: RPC source-conflict replay ───────────────────────────────────────
+// Demonstrates multi-RPC source diversity: proves the Sentinel cannot be blinded
+// by a single compromised RPC. Seeds a healthy 2-of-2 baseline, then injects a
+// snapshot where a secondary RPC disagreed on the DVN config — the SOURCE_CONFLICT
+// finding escalates to CRITICAL and lands a real attestation on Mantle Sepolia.
+
+function makeSnapshotRpcConflict(oft: string, chainId: number): OftSnapshot {
+  const base = makeSnapshot(oft, chainId, 2);
+  base.routes = base.routes.map((r) => ({ ...r, rpcConflict: true }));
+  return base;
+}
+
+export async function runRpcConflictReplay(): Promise<SentinelVerdict> {
+  const w = KELP_DEMO_OFT;
+
+  // 1. Seed a healthy baseline (no RPC conflict).
+  putSnapshot(makeSnapshot(w.address, w.chainId, 2));
+
+  // 2. Feed a snapshot flagged with an RPC conflict — CRITICAL SOURCE_CONFLICT verdict.
+  const drifted = makeSnapshotRpcConflict(w.address, w.chainId);
+  const verdict = await runCheck(w, drifted);
+  if (!verdict) throw new Error("RPC conflict replay did not trigger drift — check baseline seeding");
   return verdict;
 }

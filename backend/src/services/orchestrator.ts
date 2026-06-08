@@ -1,45 +1,30 @@
-import type { OftSnapshot, WatchedOft, SentinelVerdict, Finding, RiskLevel } from "../types.js";
+import type { OftSnapshot, WatchedOft, SentinelVerdict, Finding, RiskLevel, TransactionIntent, PolicyDecisionRecord } from "../types.js";
 import { detectDrift, assessSnapshot } from "./drift.js";
 import { verdictHash, attest } from "./attestor.js";
-import { dispatchAlert, sendTelegram } from "./alerts.js";
+import { dispatchAlert } from "./alerts.js";
 import { getSnapshot, putSnapshot, recordVerdict } from "./snapshot-store.js";
 
-// Per-OFT cooldown for weak-config Telegram alerts (1 hour). Attest fires every poll.
-const weakAlertCooldown = new Map<string, number>();
-const WEAK_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
+const RULES_VERSION = "1.0.0";
 
-async function aiWeakConfigRec(ticker: string, findings: Finding[]): Promise<string> {
-  const key = process.env.DEEPSEEK_API_KEY;
-  if (!key) return "";
-  const top = findings
-    .filter(f => f.severity === "CRITICAL" || f.severity === "HIGH")
-    .slice(0, 2)
-    .map(f => `${f.severity}: ${f.detail}`)
-    .join("\n");
-  if (!top) return "";
-  try {
-    const res = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        max_tokens: 120,
-        messages: [
-          { role: "system", content: "You are a LayerZero security advisor. Reply in exactly 2 sentences: first what to fix, then why it matters. No preamble." },
-          { role: "user", content: `${ticker} OFT has these findings:\n${top}\nWhat should the team fix first?` },
-        ],
-      }),
-    });
-    const data: any = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() ?? "";
-  } catch {
-    return "";
-  }
+function buildPdr(
+  oft: string,
+  chainId: number,
+  findings: Finding[],
+  score: number,
+  riskLevel: RiskLevel,
+  evaluatedAt: number,
+): PolicyDecisionRecord {
+  return { oft, chainId, findings, score, riskLevel, evaluatedAt, agentId: Number(process.env.SENTINEL_AGENT_ID ?? 1), rulesVersion: RULES_VERSION };
 }
 
+// Per-boot set: once an OFT's weak-config alert fires this session it won't re-fire
+// until the backend restarts. Cleared automatically on process exit.
+const weakAlertFired = new Set<string>();
+
 /**
- * Attests the current (non-drifted) weak config on-chain on every poll,
- * and sends a Telegram alert with an AI recommendation once per hour.
+ * Full alert pipeline for a persistently CRITICAL config that hasn't drifted:
+ * attests to AuditRegistry, fires AlertBus (with OFT address + tx links in Telegram),
+ * then marks the OFT so it won't re-fire this boot.
  */
 export async function produceWeakConfigAttestation(
   watched: WatchedOft,
@@ -47,34 +32,39 @@ export async function produceWeakConfigAttestation(
   findings: Finding[],
   score: number,
   riskLevel: RiskLevel,
+  tis: TransactionIntent[],
 ): Promise<void> {
-  const reasons = findings.map(f => `${f.check}: ${f.detail}`);
-  const report = { watched, snapshot, findings, score, riskLevel, reasons, ts: Date.now() };
-  const hash = verdictHash(report);
+  if (weakAlertFired.has(watched.address)) return;
 
-  // Attest on-chain every poll (continuous on-chain proof of persistent risk).
+  const reasons = findings.filter(f => f.severity !== "PASS").map(f => f.detail);
+  const pdr = buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
+  const hash = verdictHash(pdr);
+
+  const verdict: SentinelVerdict = {
+    oft: snapshot.oft,
+    chainId: watched.chainId,
+    ticker: watched.ticker,
+    score,
+    riskLevel,
+    verdict: `Persistent CRITICAL config — pre-existing risk, no drift (score ${score}/100)`,
+    reasons,
+    verdictHash: hash,
+    capturedAt: snapshot.capturedAt,
+    tis,
+    pdr,
+  };
+
   try {
     const { txHash, attestationId } = await attest(snapshot.oft, watched.chainId, hash, score, riskLevel);
+    verdict.attestTxHash = txHash;
+    verdict.attestationId = attestationId;
     console.log(`[sentinel] weak-config attest ${watched.ticker} score=${score} (id ${attestationId}) — ${txHash}`);
   } catch (e: any) {
     console.error(`[sentinel] weak-config attest failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
   }
 
-  // Telegram alert: throttled to once per hour.
-  const lastSent = weakAlertCooldown.get(watched.address) ?? 0;
-  if (Date.now() - lastSent < WEAK_ALERT_COOLDOWN_MS) return;
-
-  const rec = await aiWeakConfigRec(watched.ticker, findings);
-  const publicChatId = process.env.TELEGRAM_PUBLIC_ALERT_CHAT_ID ?? process.env.TELEGRAM_ALERT_CHAT_ID ?? null;
-  const topFinding = findings[0];
-  const msg = [
-    `⚠️ ${watched.ticker} weak config (score ${score}/100 · ${riskLevel})`,
-    topFinding ? `Top risk: ${topFinding.detail}` : "",
-    rec ? `🤖 Fix: ${rec}` : "",
-  ].filter(Boolean).join("\n");
-
-  await sendTelegram(publicChatId, msg, `weak:${watched.ticker}`);
-  weakAlertCooldown.set(watched.address, Date.now());
+  verdict.alertTxHash = await dispatchAlert(verdict, snapshot.owner ?? null);
+  weakAlertFired.add(watched.address);
 }
 
 function synthVerdict(reasons: string[], score: number, riskLevel: string): string {
@@ -93,11 +83,11 @@ export async function produceVerdict(
   snapshot: OftSnapshot,
   driftReasons: string[]
 ): Promise<SentinelVerdict> {
-  const { score, riskLevel, findings } = await assessSnapshot(snapshot, watched.ticker);
+  const { score, riskLevel, findings, tis } = await assessSnapshot(snapshot, watched.ticker);
   const reasons = driftReasons.length ? driftReasons : findings.map((f) => `${f.check}: ${f.detail}`);
 
-  const report = { watched, snapshot, findings, score, riskLevel, reasons, ts: Date.now() };
-  const hash = verdictHash(report);
+  const pdr = buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
+  const hash = verdictHash(pdr);
 
   const verdict: SentinelVerdict = {
     oft: snapshot.oft,
@@ -109,6 +99,8 @@ export async function produceVerdict(
     reasons,
     verdictHash: hash,
     capturedAt: snapshot.capturedAt,
+    tis,
+    pdr,
   };
 
   try {

@@ -97,6 +97,16 @@ export async function attest(
 
   await pub.waitForTransactionReceipt({ hash: txHash });
 
+  // Post-state verification: confirm the registry total incremented exactly once.
+  const totalAfter = (await pub.readContract({
+    address: registry,
+    abi: REGISTRY_ABI,
+    functionName: "total",
+  })) as bigint;
+  if (totalAfter !== idBefore + 1n) {
+    console.warn(`[attestor] post-state mismatch: expected total ${idBefore + 1n}, got ${totalAfter}`);
+  }
+
   // attest returns the new id; total() before the call == the id just assigned.
   return { txHash, attestationId: idBefore.toString() };
 }

@@ -16,8 +16,8 @@ On 18 April 2026, attackers drained a LayerZero bridge for $292M. The exploit ve
 
 ## Live Demo
 
-> **Frontend:** `https://[netlify-url].netlify.app`
-> **Backend API:** `https://[railway-url].up.railway.app`
+> **Frontend:** https://oft-sentinel.netlify.app
+> **Backend API:** deployed on Railway (set `VITE_API_URL` in Netlify to your Railway service URL)
 
 **Demo flow (2 min):**
 1. Visit the frontend → see the live fleet: 28 OFTs, 5 CRITICAL right now
@@ -153,7 +153,7 @@ SENTINEL_AGENT_ID=1
 DEEPSEEK_API_KEY=<key>
 DUNE_API_KEY=<key>
 MANTLE_OFT_QUERY_ID=7638642
-CORS_ORIGINS=https://<your-netlify>.netlify.app
+CORS_ORIGINS=https://oft-sentinel.netlify.app
 TELEGRAM_BOT_TOKEN=<optional>
 TELEGRAM_ALERT_CHAT_ID=<optional>
 ```

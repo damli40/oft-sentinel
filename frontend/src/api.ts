@@ -28,6 +28,35 @@ export async function getMantleOfts(): Promise<MantleOftsResponse> {
 
 // ── Sentinel ──────────────────────────────────────────────────────────────
 
+export interface TransactionIntent {
+  intent: string;
+  action: string;
+  corridors?: string[];
+  dvnAddress?: string;
+  dvnName?: string;
+  currentState: string;
+  targetState: string;
+  reason: string;
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "PASS";
+  preflight?: {
+    scoreBefore: number;
+    riskBefore: "PASS" | "AT_RISK" | "CRITICAL";
+    scoreAfter: number;
+    riskAfter: "PASS" | "AT_RISK" | "CRITICAL";
+  };
+}
+
+export interface PolicyDecisionRecord {
+  oft: string;
+  chainId: number;
+  findings: Array<{ severity: string; check: string; detail: string }>;
+  score: number;
+  riskLevel: "PASS" | "AT_RISK" | "CRITICAL";
+  evaluatedAt: number;
+  agentId: number;
+  rulesVersion: string;
+}
+
 export interface SentinelVerdict {
   oft: string;
   chainId: number;
@@ -41,6 +70,8 @@ export interface SentinelVerdict {
   attestTxHash?: string;
   alertTxHash?: string;
   capturedAt: number;
+  tis?: TransactionIntent[];
+  pdr?: PolicyDecisionRecord;
 }
 
 export interface WatchedStatus {
@@ -48,7 +79,12 @@ export interface WatchedStatus {
   address: string;
   chainId: number;
   lastSnapshotAt: number | null;
-  assessment: { score: number; riskLevel: "PASS" | "AT_RISK" | "CRITICAL" } | null;
+  assessment: {
+    score: number;
+    riskLevel: "PASS" | "AT_RISK" | "CRITICAL";
+    reasons: string[];
+    tis: TransactionIntent[];
+  } | null;
   latestVerdict: SentinelVerdict | null;
   dvnSummary: { requiredCount: number; optionalThreshold: number; effectiveCount: number; requiredDVNs: string[]; optionalDVNs: string[] } | null;
   dvnNames: Record<string, string> | null;
@@ -118,6 +154,19 @@ export async function getReport(address: string): Promise<{ ticker: string; mark
     throw new Error((err as any).error ?? "Report generation failed");
   }
   return res.json();
+}
+
+export async function runRpcConflictReplay(): Promise<SentinelVerdict> {
+  const res = await fetch(`${BASE}/sentinel/replay-rpc-conflict`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "RPC conflict replay failed");
+  }
+  return (await res.json()).verdict;
 }
 
 export async function runLibraryRevertReplay(ticker: string): Promise<SentinelVerdict> {

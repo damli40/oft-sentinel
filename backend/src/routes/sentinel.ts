@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { getWatched, pollOnce, runKelpReplay, runLibraryRevertReplay } from "../services/sentinel.js";
+import { getWatched, pollOnce, runKelpReplay, runLibraryRevertReplay, runRpcConflictReplay } from "../services/sentinel.js";
 import { getVerdicts, getSnapshot, latestVerdict, getScoreHistory, getFeedEvents } from "../services/snapshot-store.js";
 import { assessSnapshot } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
@@ -43,7 +43,12 @@ router.get("/status", async (_req: Request, res: Response) => {
     return {
       ...w,
       lastSnapshotAt: snap?.capturedAt ?? null,
-      assessment: a ? { score: a.score, riskLevel: a.riskLevel } : null,
+      assessment: a ? {
+        score: a.score,
+        riskLevel: a.riskLevel,
+        reasons: a.findings.filter(f => f.severity !== "PASS").map(f => f.detail),
+        tis: a.tis,
+      } : null,
       latestVerdict: latestVerdict(w.address, w.chainId),
       dvnSummary: firstUln ? {
         requiredCount: firstUln.requiredDVNCount,
@@ -110,6 +115,17 @@ router.post("/replay-kelp", async (_req: Request, res: Response) => {
 router.post("/replay-library-revert", async (_req: Request, res: Response) => {
   try {
     const verdict = await runLibraryRevertReplay();
+    res.json({ ok: true, verdict });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/sentinel/replay-rpc-conflict — demo: seed healthy baseline →
+// inject snapshot where secondary RPC disagrees on DVN config → CRITICAL verdict.
+router.post("/replay-rpc-conflict", async (_req: Request, res: Response) => {
+  try {
+    const verdict = await runRpcConflictReplay();
     res.json({ ok: true, verdict });
   } catch (e: any) {
     res.status(500).json({ error: e.message });

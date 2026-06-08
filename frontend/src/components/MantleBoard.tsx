@@ -51,7 +51,7 @@ export function MantleBoard({ ofts, error, status, onPick }: Props) {
             <th className="rank">#</th>
             <th>Token</th>
             <th>Address</th>
-            <th style={{ textAlign: "right" }}>30d Volume</th>
+            <th style={{ textAlign: "right" }}>All-time Volume</th>
             <th style={{ textAlign: "right" }}>Sentinel status</th>
           </tr>
         </thead>

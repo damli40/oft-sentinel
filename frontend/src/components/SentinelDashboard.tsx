@@ -4,12 +4,13 @@ import {
   getSentinelStatus,
   getSentinelVerdicts,
   runKelpReplay,
+  runRpcConflictReplay,
   pollSentinel,
   getReport,
   getFeed,
   askSecurityCopilot,
 } from "../api.ts";
-import type { SentinelStatus, SentinelVerdict, WatchedStatus, FeedEvent } from "../api.ts";
+import type { SentinelStatus, SentinelVerdict, WatchedStatus, FeedEvent, TransactionIntent, PolicyDecisionRecord } from "../api.ts";
 import { Aperture } from "./Aperture.tsx";
 import { TokenOverlay } from "./TokenOverlay.tsx";
 import "../dashboard.css";
@@ -64,35 +65,59 @@ function ago(ts: number | null): string {
 
 function pad(n: number): string { return String(Math.round(n)).padStart(2, "0"); }
 
-// ── DVN provider map (representative; matches real LayerZero DVN ecosystem) ───
+// ── DVN provider utilities ────────────────────────────────────────────────────
 
-const DVN_PROVIDERS: { name: string; tickers: string[] }[] = [
-  { name: "LZ Labs",      tickers: ["cmETH","mETH","USDC","USDT","WETH","wstETH","pufETH","rsETH","sUSDe","weETH","ezETH","stS","LBTC","wBTC","aBTC","solvBTC"] },
-  { name: "Google",       tickers: ["cmETH","mETH","USDC","USDT","WETH","wstETH","pufETH","rsETH"] },
-  { name: "Polyhedra",    tickers: ["USDC","USDT","WETH","wstETH","pufETH","rsETH"] },
-  { name: "Nethermind",   tickers: ["cmETH","mETH","USDC","USDT","pufETH","rsETH"] },
-  { name: "Canary",       tickers: ["COQ","UFD","WGC","BOX"] },
-  { name: "Mantle DVN",   tickers: ["cmETH","mETH","USDT","WETH"] },
-  { name: "StablecoinX",  tickers: ["axlUSDC","rsETH","pufETH","sUSDe"] },
-];
+function normalizeDvnName(name: string): string {
+  if (name.includes("LayerZero")) return "LZ Labs";
+  if (name.startsWith("Google")) return "Google";
+  return name;
+}
+
+/** Build a provider-name → ticker[] map from live fleet dvnNames + dvnSummary data. */
+function buildDvnMap(fleet: WatchedStatus[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const w of fleet) {
+    if (!w.dvnSummary || !w.dvnNames) continue;
+    const addrs = [...w.dvnSummary.requiredDVNs, ...w.dvnSummary.optionalDVNs];
+    for (const addr of addrs) {
+      const raw = w.dvnNames[addr] ?? w.dvnNames[addr.toLowerCase()];
+      if (!raw || raw.includes("…")) continue; // skip unresolved address fragments
+      const name = normalizeDvnName(raw);
+      if (!map.has(name)) map.set(name, []);
+      const list = map.get(name)!;
+      if (!list.includes(w.ticker)) list.push(w.ticker);
+    }
+  }
+  return map;
+}
 
 // ── DVN Concentration Panel ───────────────────────────────────────────────────
 
 interface DvnPanelProps {
   fleet: WatchedStatus[];
+  dvnMap: Map<string, string[]>;
   selectedDvn: string | null;
   onSelect: (name: string | null) => void;
 }
 
-function DvnConcentrationPanel({ fleet, selectedDvn, onSelect }: DvnPanelProps) {
+function DvnConcentrationPanel({ fleet, dvnMap, selectedDvn, onSelect }: DvnPanelProps) {
   const [open, setOpen] = useState(true);
   const fleetTickers = new Set(fleet.map(w => w.ticker));
   const totalFleet = fleet.length;
 
-  const selected = selectedDvn ? DVN_PROVIDERS.find(p => p.name === selectedDvn) : null;
-  const matchingTickers = selected ? selected.tickers.filter(t => fleetTickers.has(t)) : [];
+  const matchingTickers = selectedDvn
+    ? (dvnMap.get(selectedDvn) ?? []).filter(t => fleetTickers.has(t))
+    : [];
   const pct = totalFleet > 0 ? Math.round((matchingTickers.length / totalFleet) * 100) : 0;
   const systemic = pct >= 60;
+  const providers = Array.from(dvnMap.entries()).sort((a, b) => b[1].length - a[1].length);
+
+  // OFTs where this DVN is the sole verifier (effectiveCount === 1) vs shared
+  const matchingFleet = fleet.filter(w => matchingTickers.includes(w.ticker));
+  const soleTickers = matchingFleet
+    .filter(w => w.dvnSummary?.effectiveCount === 1)
+    .map(w => w.ticker);
+  const exploitRisk = soleTickers.length > 0;
 
   return (
     <div className="card2">
@@ -104,38 +129,42 @@ function DvnConcentrationPanel({ fleet, selectedDvn, onSelect }: DvnPanelProps) 
         <>
           <div style={{ padding: "12px 20px 8px" }}>
             <p style={{ fontSize: 12, color: "var(--text-2)", margin: 0, lineHeight: 1.5 }}>
-              Select a DVN provider to see which OFTs depend on it and assess systemic risk.
+              {providers.length === 0
+                ? "Waiting for fleet data..."
+                : "Select a DVN provider to see which OFTs depend on it and assess systemic risk."}
             </p>
           </div>
           <div className="dvn-chips">
-            {DVN_PROVIDERS.map(p => {
-              const matches = p.tickers.filter(t => fleetTickers.has(t)).length;
+            {providers.map(([name, tickers]) => {
+              const matches = tickers.filter(t => fleetTickers.has(t)).length;
               return (
                 <button
-                  key={p.name}
-                  className={`dvn-chip${selectedDvn === p.name ? " on" : ""}`}
-                  onClick={() => onSelect(selectedDvn === p.name ? null : p.name)}
+                  key={name}
+                  className={`dvn-chip${selectedDvn === name ? " on" : ""}`}
+                  onClick={() => onSelect(selectedDvn === name ? null : name)}
                 >
-                  {p.name} · {matches}
+                  {name} · {matches}
                 </button>
               );
             })}
           </div>
-          {selected && (
+          {selectedDvn && (
             <div className="dvn-result">
               <div className="dvn-res-hd">
-                <span className="dvn-res-name">{selected.name}</span>
-                {systemic && <span className="dvn-res-badge sys">SYSTEMIC RISK</span>}
+                <span className="dvn-res-name">{selectedDvn}</span>
+                {exploitRisk && systemic && <span className="dvn-res-badge sys">SYSTEMIC EXPLOIT RISK</span>}
+                {exploitRisk && !systemic && <span className="dvn-res-badge sys">EXPLOIT RISK</span>}
+                {!exploitRisk && systemic && <span className="dvn-res-badge" style={{ background: "var(--warn)" }}>LIVENESS RISK</span>}
               </div>
               <div className="dvn-res-stats">
                 <div className="dvn-stat">
-                  <div className="v" style={{ color: systemic ? "var(--critical)" : "var(--scan)" }}>
+                  <div className="v" style={{ color: exploitRisk ? "var(--critical)" : systemic ? "var(--warn)" : "var(--scan)" }}>
                     {matchingTickers.length}
                   </div>
                   <div className="l">OFTs</div>
                 </div>
                 <div className="dvn-stat">
-                  <div className="v" style={{ color: systemic ? "var(--critical)" : "var(--scan)" }}>
+                  <div className="v" style={{ color: exploitRisk ? "var(--critical)" : systemic ? "var(--warn)" : "var(--scan)" }}>
                     {pct}%
                   </div>
                   <div className="l">of fleet</div>
@@ -143,8 +172,13 @@ function DvnConcentrationPanel({ fleet, selectedDvn, onSelect }: DvnPanelProps) 
               </div>
               <div className="dvn-res-tks">
                 {matchingTickers.map(t => (
-                  <span key={t} className="spill s-scan" style={{ padding: "2px 8px", fontSize: 11 }}>
-                    {t}
+                  <span
+                    key={t}
+                    className={soleTickers.includes(t) ? "spill s-crit" : "spill s-scan"}
+                    style={{ padding: "2px 8px", fontSize: 11 }}
+                    title={soleTickers.includes(t) ? "Sole verifier — exploit risk" : "Shared verifier — liveness risk only"}
+                  >
+                    {t}{soleTickers.includes(t) ? " ⚠" : ""}
                   </span>
                 ))}
                 {matchingTickers.length === 0 && (
@@ -153,9 +187,11 @@ function DvnConcentrationPanel({ fleet, selectedDvn, onSelect }: DvnPanelProps) 
                   </span>
                 )}
               </div>
-              {systemic && (
+              {(exploitRisk || systemic) && (
                 <div className="dvn-res-warn">
-                  ⚠ {selected.name} covers {pct}% of the monitored fleet. If this DVN is compromised, {matchingTickers.length} bridges are simultaneously at risk.
+                  {exploitRisk
+                    ? `⚠ ${selectedDvn} is the sole verifier on ${soleTickers.join(", ")}. If compromised, transfers on ${soleTickers.length === 1 ? "that bridge" : "those bridges"} can be forged — the Kelp attack pattern.${systemic ? ` It also covers ${pct}% of the fleet as a shared verifier.` : ""}`
+                    : `ℹ ${selectedDvn} covers ${pct}% of the fleet as a shared verifier. If it goes offline, message delivery pauses on ${matchingTickers.length} bridges — no transfers can be forged. The team can add a replacement DVN.`}
                 </div>
               )}
             </div>
@@ -477,7 +513,11 @@ function ReportModal({ watched, onClose }: ReportModalProps) {
 
 // ── Verdict spotlight ─────────────────────────────────────────────────────────
 
-function VerdictSpotlight({ verdict, status }: { verdict: SentinelVerdict | null; status: SentinelStatus | null }) {
+function VerdictSpotlight({ verdict, status, onShowReport }: {
+  verdict: SentinelVerdict | null;
+  status: SentinelStatus | null;
+  onShowReport?: (w: WatchedStatus) => void;
+}) {
   if (!verdict && !status) {
     return (
       <div className="spotlight" style={{ padding: 24, opacity: 0.5 }}>
@@ -500,6 +540,9 @@ function VerdictSpotlight({ verdict, status }: { verdict: SentinelVerdict | null
 
   let score = 0, lvl: RiskLvl = "scan", tkr = "-", addr = "", reasons: string[] = [];
   let attestId: string | undefined, attestTx: string | undefined, alertTx: string | undefined;
+  let assessedOft: WatchedStatus | null = null;
+  let tis: TransactionIntent[] | undefined;
+  let pdr: PolicyDecisionRecord | undefined;
 
   if (verdict) {
     score    = verdict.score;
@@ -510,6 +553,8 @@ function VerdictSpotlight({ verdict, status }: { verdict: SentinelVerdict | null
     attestId = verdict.attestationId;
     attestTx = verdict.attestTxHash;
     alertTx  = verdict.alertTxHash;
+    tis      = verdict.tis;
+    pdr      = verdict.pdr;
   } else if (status) {
     const first = [...status.watched]
       .sort((a, b) => (a.assessment?.score ?? 100) - (b.assessment?.score ?? 100))[0];
@@ -518,9 +563,9 @@ function VerdictSpotlight({ verdict, status }: { verdict: SentinelVerdict | null
       lvl   = riskLevel(first);
       tkr   = first.ticker;
       addr  = first.address;
-      reasons = lvl === "crit"
-        ? ["Single DVN detected: 1-of-1 configuration", "If that one checker is compromised, every transfer can be faked", "This is the exact pattern that drained Kelp ($292M)"]
-        : ["Configuration deviates from the baseline", "Monitor closely. Not yet exploitable."];
+      reasons = first.assessment?.reasons ?? [];
+      tis     = first.assessment?.tis;
+      assessedOft = first;
     }
   }
 
@@ -545,6 +590,24 @@ function VerdictSpotlight({ verdict, status }: { verdict: SentinelVerdict | null
         <ul className="reasons">
           {reasons.map((r, i) => <li key={i}>{r}</li>)}
         </ul>
+        {tis && tis.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 10, color: "var(--text-2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 5 }}>Remediation</div>
+            <ol style={{ margin: 0, paddingLeft: 16 }}>
+              {tis.slice(0, 5).map((t, i) => (
+                <li key={i} style={{ fontSize: 12, marginBottom: 4, color: "var(--text)" }}>
+                  <span style={{ color: riskColor(t.severity), fontWeight: 600, marginRight: 5 }}>{t.severity}</span>
+                  {t.action}{t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}
+                  {t.preflight && t.preflight.scoreAfter > t.preflight.scoreBefore && (
+                    <span style={{ marginLeft: 8, color: "var(--safe)", fontSize: 11 }}>
+                      → {t.preflight.scoreAfter}/{t.preflight.riskAfter}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
         {(attestTx || alertTx || attestId !== undefined) && (
           <div className="tx">
             {attestTx && (
@@ -557,6 +620,46 @@ function VerdictSpotlight({ verdict, status }: { verdict: SentinelVerdict | null
                 🔔 alert dispatched ↗
               </a>
             )}
+            {addr && (
+              <a className="txlink" href={`${MAINNET}/address/${addr}`} target="_blank" rel="noreferrer">
+                OFT ↗
+              </a>
+            )}
+          </div>
+        )}
+        {pdr && (
+          <div style={{ marginTop: 10, padding: "8px 10px", background: "rgba(91,231,240,0.05)", borderRadius: 6, borderLeft: "2px solid var(--scan)" }}>
+            <div style={{ fontSize: 10, color: "var(--scan)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>Policy Decision Record</div>
+            <div style={{ fontSize: 11, color: "var(--text-2)", lineHeight: 1.7 }}>
+              Rules v{pdr.rulesVersion} · Agent #{pdr.agentId} · {pdr.findings.length} checks evaluated
+            </div>
+            <div style={{ fontSize: 10, color: "var(--text-2)", marginTop: 3 }}>
+              keccak256(JSON.stringify(PDR)) == verdictHash — independently verifiable
+            </div>
+          </div>
+        )}
+        {assessedOft && (
+          <div className="tx">
+            <a className="txlink" href={`${MAINNET}/address/${addr}`} target="_blank" rel="noreferrer">
+              OFT ↗
+            </a>
+            <button
+              className="txlink"
+              style={{ background: "none", border: "none", cursor: "pointer" }}
+              onClick={() => onShowReport?.(assessedOft!)}
+            >
+              ↓ report
+            </button>
+            <button
+              className="txlink"
+              style={{ background: "none", border: "none", cursor: "pointer" }}
+              onClick={() => {
+                const el = document.getElementById(`ft-${addr}`);
+                el?.scrollIntoView({ behavior: "smooth", block: "center" });
+              }}
+            >
+              ↓ fleet
+            </button>
           </div>
         )}
       </div>
@@ -576,7 +679,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
   const [verdicts, setVerdicts] = useState<SentinelVerdict[]>([]);
   const [feedEvents, setFeedEvents] = useState<FeedEvent[]>([]);
   const [error, setError]     = useState("");
-  const [busy, setBusy]       = useState<null | "replay" | "poll">(null);
+  const [busy, setBusy]       = useState<null | "replay" | "rpc-conflict" | "poll">(null);
   const [filter, setFilter]   = useState<"all" | "crit" | "warn" | "safe">("all");
   const [reportTarget, setReportTarget]   = useState<WatchedStatus | null>(null);
   const [overlayTarget, setOverlayTarget] = useState<WatchedStatus | null>(null);
@@ -659,6 +762,23 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
     }
   }
 
+  async function handleRpcConflictReplay() {
+    setError("");
+    setBusy("rpc-conflict");
+    addLog(mkLine("ok", "✓", "baseline seeded, DEMO 2-of-2", "· healthy"));
+    try {
+      await runRpcConflictReplay();
+      addLog(mkLine("alert", "⚠", "DRIFT DETECTED: DEMO"));
+      setTimeout(() => addLog(mkLine("alert", "", "RPC conflict on ethereum corridor")), 500);
+      await refresh();
+      setTimeout(() => addLog(mkLine("ok", "✓", "attested · alert dispatched")), 1200);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function handlePoll() {
     setError("");
     setBusy("poll");
@@ -689,9 +809,8 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
     return true;
   });
 
-  const selectedDvnTickers = selectedDvn
-    ? new Set(DVN_PROVIDERS.find(p => p.name === selectedDvn)?.tickers ?? [])
-    : null;
+  const dvnMap = buildDvnMap(status?.watched ?? []);
+  const selectedDvnTickers = selectedDvn ? new Set(dvnMap.get(selectedDvn) ?? []) : null;
 
   return (
     <section id="view-sentinel" className="view on">
@@ -710,12 +829,13 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                   {latest ? ago(latest.capturedAt) : "-"}
                 </span>
               </div>
-              <VerdictSpotlight verdict={latest} status={status} />
+              <VerdictSpotlight verdict={latest} status={status} onShowReport={setReportTarget} />
             </div>
 
             {/* DVN Concentration Panel */}
             <DvnConcentrationPanel
               fleet={assessed}
+              dvnMap={dvnMap}
               selectedDvn={selectedDvn}
               onSelect={setSelectedDvn}
             />
@@ -762,6 +882,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                       return (
                         <div
                           key={w.address}
+                          id={`ft-${w.address}`}
                           className={`ftile ${lvl}${dvnCls}`}
                           onClick={() => setOverlayTarget(w)}
                         >
@@ -832,6 +953,14 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                   disabled={busy !== null}
                 >
                   {busy === "replay" ? "● Replaying…" : "▶ Run Kelp replay"}
+                </button>
+                <button
+                  className="btn btn-danger"
+                  onClick={handleRpcConflictReplay}
+                  disabled={busy !== null}
+                  title="Demonstrates multi-RPC source diversity: injects an RPC conflict → CRITICAL verdict + on-chain attestation"
+                >
+                  {busy === "rpc-conflict" ? "● Replaying…" : "▶ Run RPC conflict replay"}
                 </button>
                 <button
                   className="btn btn-ghost"

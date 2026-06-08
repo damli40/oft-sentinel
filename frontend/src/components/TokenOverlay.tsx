@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
-import type { WatchedStatus } from "../api.ts";
+import type { WatchedStatus, TransactionIntent } from "../api.ts";
 
 const SEPOLIA = "https://sepolia.mantlescan.xyz";
 const MAINNET  = "https://mantlescan.xyz";
@@ -76,11 +76,7 @@ export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) 
 
   const reasons: string[] = v?.reasons.length
     ? v.reasons
-    : lvl === "crit"
-      ? ["Single DVN detected: 1-of-1 configuration", "Exploitable if that checker is compromised", "Matches the Kelp ($292M) attack pattern"]
-      : lvl === "warn"
-        ? ["Configuration deviates from baseline", "Monitor closely — not yet exploitable"]
-        : [];
+    : watched.assessment?.reasons ?? [];
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === "Escape") onClose(); }
@@ -200,6 +196,34 @@ export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) 
                 </div>
               </div>
             )}
+
+            {/* Remediation steps (TIS with pre-flight) */}
+            {(() => {
+              const tis: TransactionIntent[] = watched.latestVerdict?.tis?.length
+                ? watched.latestVerdict.tis
+                : watched.assessment?.tis ?? [];
+              if (!tis.length) return null;
+              const sevColor = (s: string) =>
+                s === "CRITICAL" ? "#FF4D5E" : s === "HIGH" ? "#FFB23E" : s === "MEDIUM" ? "#5BE7F0" : "#8899aa";
+              return (
+                <div>
+                  <div className="to-sec-lbl">Remediation steps</div>
+                  <ol style={{ margin: 0, paddingLeft: 16 }}>
+                    {tis.slice(0, 5).map((t, i) => (
+                      <li key={i} style={{ fontSize: 12, marginBottom: 6, color: "var(--text)" }}>
+                        <span style={{ color: sevColor(t.severity), fontWeight: 600, marginRight: 5 }}>{t.severity}</span>
+                        {t.action}{t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}
+                        {t.preflight && t.preflight.scoreAfter > t.preflight.scoreBefore && (
+                          <span style={{ marginLeft: 8, color: "#34D27D", fontSize: 11 }}>
+                            → {t.preflight.scoreAfter}/{t.preflight.riskAfter}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              );
+            })()}
 
             {/* Monitored corridors */}
             <div>

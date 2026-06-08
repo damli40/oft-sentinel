@@ -22,6 +22,11 @@ const SEL = {
 // RPC URLs for destination-side receive reads are curated; absent = skip mismatch check.
 const DEPLOYMENTS_URL = "https://metadata.layerzero-api.com/v1/metadata/deployments";
 
+// Secondary Mantle RPCs used for source-conflict detection. Cross-checking the send-side
+// ULN against an independent provider makes it harder to blind the Sentinel via a
+// compromised or manipulated primary RPC. Both are confirmed public endpoints.
+const MANTLE_FALLBACK_RPCS = ["https://mantle.drpc.org", "https://1rpc.io/mantle"];
+
 // Public RPCs for destination-side receive reads. Only needed for mismatch detection;
 // primary signals (counts/confs/libs/owner) are all Mantle-side reads.
 const CHAIN_RPC: Record<string, string> = {
@@ -223,6 +228,9 @@ async function rawCall(client: ReturnType<typeof createPublicClient>, to: Addres
  */
 export async function readSnapshot(oft: string, chainId: number, rpcUrl: string): Promise<OftSnapshot> {
   const srcClient = createPublicClient({ transport: http(rpcUrl) });
+  // Pick one secondary RPC for cross-checking send-side DVN config (source-conflict detection).
+  const secondaryRpcUrl = MANTLE_FALLBACK_RPCS.find((r) => r !== rpcUrl);
+  const secondaryClient = secondaryRpcUrl ? createPublicClient({ transport: http(secondaryRpcUrl) }) : null;
   const oftAddr = getAddress(oft) as Address;
   const [dvnMeta, eidMap] = await Promise.all([loadDvnMeta(), loadEidMap()]);
 
@@ -300,6 +308,28 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
             await rawCall(srcClient, ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
           );
         } catch { /* null */ }
+      }
+
+      // ── RPC source-conflict check ────────────────────────────────────────
+      // Cross-check the send-side ULN against a secondary Mantle RPC.
+      // Disagreement on requiredDVNs / counts / optionalDVNThreshold flags the route
+      // as potentially manipulated — surfaced as CRITICAL in assessSnapshot.
+      if (route.sendLibrary && route.uln && secondaryClient) {
+        try {
+          const fbUln = decodeUlnConfig(
+            await rawCall(secondaryClient, ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
+          );
+          if (fbUln) {
+            const sameCount = fbUln.requiredDVNCount === route.uln.requiredDVNCount;
+            const sameThreshold = fbUln.optionalDVNThreshold === route.uln.optionalDVNThreshold;
+            const sameDvns = fbUln.requiredDVNs.length === route.uln.requiredDVNs.length &&
+              fbUln.requiredDVNs.every((a, i) => a.toLowerCase() === route.uln!.requiredDVNs[i]?.toLowerCase());
+            if (!sameCount || !sameThreshold || !sameDvns) {
+              route.rpcConflict = true;
+              console.warn(`[lz-config] RPC conflict ${oft} eid=${eid}: primary=${JSON.stringify(route.uln.requiredDVNs)}, secondary=${JSON.stringify(fbUln.requiredDVNs)}`);
+            }
+          }
+        } catch { /* secondary unavailable — skip check */ }
       }
 
       // ── Enforced options ────────────────────────────────────────────────

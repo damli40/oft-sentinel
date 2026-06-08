@@ -1,4 +1,4 @@
-import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel } from "../types.js";
+import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, PreflightResult } from "../types.js";
 import { computeScore } from "./score.js";
 import { loadDvnMeta, resolveDvn, isDvnDeprecated } from "./lz-config.js";
 
@@ -41,6 +41,11 @@ export async function detectDrift(prev: OftSnapshot, next: OftSnapshot): Promise
       continue;
     }
 
+    // RPC source-conflict: newly detected disagreement between providers on this route.
+    if (!before?.rpcConflict && route.rpcConflict) {
+      reasons.push(`${route.chainName}: RPC providers disagree on required DVN configuration — possible source manipulation`);
+    }
+
     // Only compare DVN count / confirmations when BOTH snapshots carry a real ULN
     // read. A null `uln` means the on-chain read failed (transient RPC) — coercing
     // "missing" to 0 would read as a downgrade and fire a false CRITICAL that gets
@@ -81,6 +86,15 @@ export async function detectDrift(prev: OftSnapshot, next: OftSnapshot): Promise
 
 const RISK_RANK: Record<RiskLevel, number> = { PASS: 0, AT_RISK: 1, CRITICAL: 2 };
 
+// Severity → score deduction (mirrors score.ts).
+const SEV_DEDUCTION: Record<Severity, number> = { CRITICAL: 40, HIGH: 20, MEDIUM: 10, LOW: 5, PASS: 0 };
+
+function preflightScore(score: number, riskLevel: RiskLevel, severity: Severity): PreflightResult {
+  const scoreAfter = Math.min(100, score + SEV_DEDUCTION[severity]);
+  const riskAfter: RiskLevel = scoreAfter <= 25 ? "CRITICAL" : scoreAfter <= 84 ? "AT_RISK" : "PASS";
+  return { scoreBefore: score, riskBefore: riskLevel, scoreAfter, riskAfter };
+}
+
 /**
  * Deterministic risk assessment of a single snapshot.
  *
@@ -99,13 +113,48 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
   findings: Finding[];
   score: number;
   riskLevel: RiskLevel;
+  tis: TransactionIntent[];
 }> {
   const findings: Finding[] = [];
+  // TIS: keyed by "intent|dvnAddress" to collapse identical issues across corridors into one entry.
+  const tisMap = new Map<string, TransactionIntent>();
+
+  function addTIS(key: string, corridor: string | null, entry: Omit<TransactionIntent, "corridors">): void {
+    if (!tisMap.has(key)) {
+      tisMap.set(key, { ...entry, corridors: corridor ? [corridor] : undefined });
+    } else if (corridor) {
+      const ex = tisMap.get(key)!;
+      if (!ex.corridors) ex.corridors = [];
+      if (!ex.corridors.includes(corridor)) ex.corridors.push(corridor);
+    }
+  }
+
   const dvnMeta = await loadDvnMeta();
   // DVN names are keyed by LZ chainKey string ("mantle"), not numeric chain ID ("5000").
   const srcChainKey = "mantle";
 
   for (const route of activeRoutes(snap)) {
+    // ── RPC source conflict ─────────────────────────────────────────────────
+    // Flagged by lz-config.ts when a secondary Mantle RPC returns different
+    // requiredDVNs / counts. Either a compromised primary RPC is hiding a
+    // security downgrade, or there is a genuine data inconsistency — both
+    // require manual verification before trusting any automated verdict.
+    if (route.rpcConflict) {
+      findings.push({
+        severity: "CRITICAL",
+        check: "RPC Source Conflict",
+        detail: `${route.chainName}: multiple RPC providers disagree on the required DVN configuration — possible node manipulation or data inconsistency.`,
+      });
+      addTIS("resolve_rpc_conflict", route.chainName, {
+        intent: "resolve_rpc_conflict",
+        action: "Manually verify DVN configuration on-chain before trusting this verdict",
+        currentState: "Multiple RPC sources return conflicting DVN configs",
+        targetState: "All RPC sources agree on the same DVN configuration",
+        reason: "RPC disagreement may indicate node manipulation, stale data, or a mid-block state read",
+        severity: "CRITICAL",
+      });
+    }
+
     const uln = route.uln;
     if (!uln) continue;
     const dstChainKey = route.chainKey; // destination chainKey — for DVN name lookup on dst
@@ -121,11 +170,29 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         check: "DVN Count",
         detail: `${route.chainName}: 1-of-1 effective DVN (${reqNames || "unresolved"}) — single point of failure (Kelp rsETH exploit pattern).`,
       });
+      addTIS("restore_dvn_redundancy", route.chainName, {
+        intent: "restore_dvn_redundancy",
+        action: "Add a second independent required DVN to the send configuration",
+        dvnAddress: uln.requiredDVNs[0],
+        dvnName: uln.requiredDVNs[0] ? resolveDvn(uln.requiredDVNs[0], srcChainKey, dvnMeta) : undefined,
+        currentState: `1 effective DVN (${reqNames || "unresolved"}) — single point of failure`,
+        targetState: "≥2 independent required DVNs per message path",
+        reason: "1-of-1 DVN config matches the Kelp rsETH exploit pattern — single DVN compromise enables message forgery",
+        severity: "CRITICAL",
+      });
     } else if (effectiveDvnCount === 2) {
       findings.push({
         severity: "MEDIUM",
         check: "DVN Count",
         detail: `${route.chainName}: 2 effective DVNs (${reqNames}) — minimal redundancy.`,
+      });
+      addTIS("increase_dvn_redundancy", route.chainName, {
+        intent: "increase_dvn_redundancy",
+        action: "Add a third independent required DVN to strengthen verification",
+        currentState: `2 effective DVNs (${reqNames}) — one compromise breaks the quorum`,
+        targetState: "≥3 independent required DVNs per message path",
+        reason: "2-of-2 DVN config means a single DVN compromise or liveness failure halts all messages",
+        severity: "MEDIUM",
       });
     }
 
@@ -138,6 +205,16 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
           severity: "CRITICAL",
           check: "Deprecated DVN",
           detail: `${route.chainName}: required DVN "${name}" is deprecated — messages may halt.`,
+        });
+        addTIS(`replace_deprecated_dvn|${dvnAddr.toLowerCase()}`, route.chainName, {
+          intent: "replace_deprecated_dvn",
+          action: `Replace deprecated DVN "${name}" with an active supported alternative`,
+          dvnAddress: dvnAddr,
+          dvnName: name,
+          currentState: `"${name}" is deprecated — messages may permanently halt`,
+          targetState: "Active, supported DVN in required set",
+          reason: "Deprecated DVNs stop attesting messages, permanently blocking the route",
+          severity: "CRITICAL",
         });
       }
     }
@@ -186,6 +263,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
             check: "DVN Mismatch",
             detail: `${route.chainName}: send DVNs [${sendNames.join(", ")}] ≠ receive DVNs [${recvNames.join(", ")}] — messages will be permanently blocked.`,
           });
+          addTIS(`resolve_dvn_mismatch`, route.chainName, {
+            intent: "resolve_dvn_mismatch",
+            action: "Align send and receive DVN sets so both sides verify the same providers",
+            currentState: `Send [${sendNames.join(", ")}] ≠ receive [${recvNames.join(", ")}]`,
+            targetState: "Matching DVN sets on send and receive sides",
+            reason: "DVN mismatch means no message can be verified — permanent route block",
+            severity: "HIGH",
+          });
         }
       }
     }
@@ -196,6 +281,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         severity: "MEDIUM",
         check: "Confirmations",
         detail: `${route.chainName}: ${uln.confirmations} block confirmations (< 15 — reorg risk).`,
+      });
+      addTIS("increase_confirmations", route.chainName, {
+        intent: "increase_confirmations",
+        action: "Raise confirmation threshold to ≥15 blocks",
+        currentState: `${uln.confirmations} block confirmation${uln.confirmations !== 1 ? "s" : ""}`,
+        targetState: "≥15 block confirmations",
+        reason: "Low confirmations expose the route to chain re-org attacks",
+        severity: "MEDIUM",
       });
     }
 
@@ -217,6 +310,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         check: "Send Library Pinning",
         detail: `${route.chainName}: send library is the upgradeable default — LZ Labs OneSig can redirect outbound verification unilaterally.`,
       });
+      addTIS("pin_send_library", route.chainName, {
+        intent: "pin_send_library",
+        action: "Pin the send library to a specific version",
+        currentState: "Upgradeable default (LZ Labs-controlled)",
+        targetState: "Pinned library address immutable to LZ Labs upgrades",
+        reason: "Unpinned send library lets LZ Labs OneSig redirect outbound message verification",
+        severity: "HIGH",
+      });
     }
 
     // ── Receive library pinning ──────────────────────────────────────────────
@@ -229,6 +330,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         check: "Receive Library",
         detail: `${route.chainName}: receive library is the upgradeable default — LZ Labs can change inbound message acceptance rules unilaterally, bypassing DVN config.`,
       });
+      addTIS("pin_receive_library", route.chainName, {
+        intent: "pin_receive_library",
+        action: "Pin the receive library to a specific version",
+        currentState: "Upgradeable default (LZ Labs-controlled)",
+        targetState: "Pinned library address immutable to LZ Labs upgrades",
+        reason: "Unpinned receive library lets LZ Labs change inbound acceptance rules, bypassing DVN config entirely",
+        severity: "CRITICAL",
+      });
     }
 
     // ── Confirmation mismatch (send vs receive) ──────────────────────────────
@@ -240,6 +349,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         check: "Confirmation Mismatch",
         detail: `${route.chainName}: send confirmations (${route.uln.confirmations}) < receive required (${route.receiveUln.confirmations}) — messages will be permanently blocked.`,
       });
+      addTIS(`resolve_confirmation_mismatch`, route.chainName, {
+        intent: "resolve_confirmation_mismatch",
+        action: `Raise send confirmations to match the destination's required ${route.receiveUln.confirmations}`,
+        currentState: `Send ${route.uln.confirmations} < receive required ${route.receiveUln.confirmations}`,
+        targetState: `Send confirmations ≥ ${route.receiveUln.confirmations}`,
+        reason: "Send confirmations below receive threshold permanently blocks message delivery",
+        severity: "HIGH",
+      });
     }
   }
 
@@ -250,6 +367,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
       check: "Owner Type",
       detail: "OFT owner is an EOA — config can be changed by a single private key.",
     });
+    addTIS("transfer_ownership_to_multisig", null, {
+      intent: "transfer_ownership_to_multisig",
+      action: "Transfer OFT ownership to a multisig (e.g. Gnosis Safe)",
+      currentState: "EOA owner — single private key controls all configuration",
+      targetState: "Multisig owner — M-of-N signers required for config changes",
+      reason: "EOA ownership means a single key compromise can alter DVN config, message libraries, or peer addresses",
+      severity: "HIGH",
+    });
   }
 
   // ── Proxy upgrade path ───────────────────────────────────────────────────
@@ -259,6 +384,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         severity: "HIGH",
         check: "Proxy Upgrade Control",
         detail: `Proxy admin owner is an EOA (${snap.proxyAdminOwner?.slice(0, 10)}…) — a single key can upgrade the implementation.`,
+      });
+      addTIS("transfer_proxy_admin_to_multisig", null, {
+        intent: "transfer_proxy_admin_to_multisig",
+        action: "Transfer proxy admin control to a multisig",
+        currentState: `EOA proxy admin (${snap.proxyAdminOwner?.slice(0, 10)}…)`,
+        targetState: "Multisig-controlled proxy upgrade path",
+        reason: "EOA proxy admin means a single key can upgrade the OFT implementation",
+        severity: "HIGH",
       });
     }
     // Multisig-controlled proxy is the recommended configuration — no deduction.
@@ -276,5 +409,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
   if (riskLevel === "CRITICAL") score = Math.min(score, 25);
   if (riskLevel === "AT_RISK") score = Math.min(score, 84);
 
-  return { findings, score, riskLevel };
+  const SEV_ORDER: Record<Severity, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, PASS: 4 };
+  const tis = [...tisMap.values()].sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity]);
+
+  // Attach pre-flight simulation to each TIS entry: what would score/risk be
+  // if this single finding were resolved (all other findings unchanged)?
+  for (const intent of tis) {
+    intent.preflight = preflightScore(score, riskLevel, intent.severity);
+  }
+
+  return { findings, score, riskLevel, tis };
 }

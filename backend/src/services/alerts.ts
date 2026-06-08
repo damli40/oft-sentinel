@@ -175,6 +175,14 @@ export async function dispatchAlert(
     attestationLine,
     txLine,
   ].join("\n");
+  const tisLines = v.tis && v.tis.length > 0
+    ? [
+        "Remediation:",
+        ...v.tis.slice(0, 3).map((t, i) =>
+          `  ${i + 1}. [${t.severity}] ${t.action}${t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}`
+        ),
+      ]
+    : [];
   const teamMessage = [
     `Action needed: ${v.ticker} OFT drift detected`,
     `Risk: ${v.riskLevel}`,
@@ -185,6 +193,7 @@ export async function dispatchAlert(
     `Owner nudge recipient: ${recipient}`,
     attestationLine,
     txLine,
+    ...tisLines,
   ].join("\n");
 
   const recipients = telegramRecipients(v);

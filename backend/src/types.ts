@@ -42,6 +42,7 @@ export interface RouteSnapshot {
   peerAddress: string | null;   // the peer OFT address on the destination chain
   hasEnforcedOptions: boolean | null; // true if setEnforcedOptions was called for this eid
   isActive: boolean;
+  rpcConflict?: boolean; // true if a secondary RPC returned different DVN config for this route
 }
 
 /** Full point-in-time config snapshot for a watched OFT. */
@@ -68,6 +69,44 @@ export interface DriftResult {
   reasons: string[];
 }
 
+/** Score/risk prediction if a single TIS remediation were applied. */
+export interface PreflightResult {
+  scoreBefore: number;
+  riskBefore: RiskLevel;
+  scoreAfter: number;
+  riskAfter: RiskLevel;
+}
+
+/** A structured remediation proposal emitted alongside every verdict. */
+export interface TransactionIntent {
+  intent: string;           // e.g. "restore_dvn_redundancy" | "pin_receive_library"
+  action: string;           // human-readable: what to do
+  corridors?: string[];     // destination chain names affected (absent for non-route issues)
+  dvnAddress?: string;
+  dvnName?: string;
+  currentState: string;
+  targetState: string;
+  reason: string;
+  severity: Severity;
+  preflight?: PreflightResult; // simulated outcome if this one issue were resolved
+}
+
+/**
+ * Canonical, minimal record that gets hashed and attested on-chain.
+ * The on-chain verdictHash = keccak256(JSON.stringify(pdr)).
+ * Anyone can recompute: hash(this struct) == verdictHash in AuditRegistry.
+ */
+export interface PolicyDecisionRecord {
+  oft: string;         // checksum address of the watched OFT
+  chainId: number;     // Mantle mainnet (5000)
+  findings: Finding[]; // full set of checks run — severity "PASS" + non-pass
+  score: number;
+  riskLevel: RiskLevel;
+  evaluatedAt: number; // unix ms; matches what was hashed and submitted on-chain
+  agentId: number;     // ERC-8004 token ID (SENTINEL_AGENT_ID env)
+  rulesVersion: string; // "1.0.0"
+}
+
 /** A stored Sentinel verdict — the off-chain record mirrored by an on-chain attestation. */
 export interface SentinelVerdict {
   oft: string;
@@ -82,4 +121,6 @@ export interface SentinelVerdict {
   attestTxHash?: string;
   alertTxHash?: string;
   capturedAt: number;
+  tis?: TransactionIntent[];
+  pdr?: PolicyDecisionRecord; // stored so anyone can recompute verdictHash = hash(pdr)
 }
