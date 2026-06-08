@@ -132,18 +132,11 @@ export async function loadDvnMeta(): Promise<DvnMeta> {
   }
 }
 
-// Human-readable overrides for opaque canonical names returned by the LZ metadata API.
-// Keys are exact canonical names (case-sensitive) from the API's canonicalName field.
-const FRIENDLY_DVN: Record<string, string> = {
-  "Mantle01":    "Mantle DVN #1",
-  "Mantle02":    "Mantle DVN #2",
-  "Mantle03":    "Mantle DVN #3",
-  "MantleCross": "MantleCross DVN",
-  // LZDeadDVN is intentionally left as-is — it's a named LZ contract, not a generic label.
-  // Any OFT route listing it as a required DVN is permanently message-blocked (null verifier).
-  "StablecoinX": "StablecoinX",
-  "Mantle Bank": "Mantle Bank DVN",
-};
+// Overrides for canonical names returned by the LZ metadata API.
+// Only add entries backed by wiki/ — do not invent descriptions.
+// LZDeadDVN is intentionally absent: it's a named LZ null-verifier contract; any route
+// listing it is permanently message-blocked. Keep canonical name exactly as-is.
+const FRIENDLY_DVN: Record<string, string> = {};
 
 /** Resolve a DVN address to its canonical name, keyed by the chain's chainKey string.
  *  Falls back to globalFallback (same name on every chain) then address fragment.
