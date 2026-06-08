@@ -67,3 +67,4 @@ export async function getSentinelWatchlist(force = false): Promise<MantleOft[]> 
 }
 
 export const MANTLE_OFT_QUERY_ID = LEADERBOARD_QUERY_ID;
+export const MANTLE_SENTINEL_QUERY_ID = SENTINEL_QUERY_ID;
