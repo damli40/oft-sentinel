@@ -67,13 +67,13 @@ function pad(n: number): string { return String(Math.round(n)).padStart(2, "0");
 // ── DVN provider map (representative; matches real LayerZero DVN ecosystem) ───
 
 const DVN_PROVIDERS: { name: string; tickers: string[] }[] = [
-  { name: "LZ Labs",    tickers: ["cmETH","mETH","USDC","USDT","WETH","wstETH","pufETH","rsETH","sUSDe","weETH","ezETH","stS","LBTC","wBTC","aBTC","solvBTC"] },
-  { name: "Google",     tickers: ["cmETH","mETH","USDC","USDT","WETH","wstETH","pufETH","rsETH"] },
-  { name: "Polyhedra",  tickers: ["USDC","USDT","WETH","wstETH","pufETH","rsETH"] },
-  { name: "Nethermind", tickers: ["cmETH","mETH","USDC","USDT","pufETH","rsETH"] },
-  { name: "Canary",     tickers: ["COQ","UFD","WGC","BOX"] },
-  { name: "Mantle03",   tickers: ["cmETH","mETH","USDT","WETH"] },
-  { name: "STB",        tickers: ["axlUSDC","rsETH","pufETH","sUSDe"] },
+  { name: "LZ Labs",      tickers: ["cmETH","mETH","USDC","USDT","WETH","wstETH","pufETH","rsETH","sUSDe","weETH","ezETH","stS","LBTC","wBTC","aBTC","solvBTC"] },
+  { name: "Google",       tickers: ["cmETH","mETH","USDC","USDT","WETH","wstETH","pufETH","rsETH"] },
+  { name: "Polyhedra",    tickers: ["USDC","USDT","WETH","wstETH","pufETH","rsETH"] },
+  { name: "Nethermind",   tickers: ["cmETH","mETH","USDC","USDT","pufETH","rsETH"] },
+  { name: "Canary",       tickers: ["COQ","UFD","WGC","BOX"] },
+  { name: "Mantle DVN",   tickers: ["cmETH","mETH","USDT","WETH"] },
+  { name: "StablecoinX",  tickers: ["axlUSDC","rsETH","pufETH","sUSDe"] },
 ];
 
 // ── DVN Concentration Panel ───────────────────────────────────────────────────

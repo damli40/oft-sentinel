@@ -132,13 +132,29 @@ export async function loadDvnMeta(): Promise<DvnMeta> {
   }
 }
 
+// Human-readable overrides for opaque canonical names returned by the LZ metadata API.
+// Keys are exact canonical names (case-sensitive) from the API's canonicalName field.
+const FRIENDLY_DVN: Record<string, string> = {
+  "Mantle01":    "Mantle DVN #1",
+  "Mantle02":    "Mantle DVN #2",
+  "Mantle03":    "Mantle DVN #3",
+  "MantleCross": "MantleCross DVN",
+  "LZDeadDVN":   "LZ Deprecated DVN",
+  "TSS":         "TSS (Threshold Signature)",
+  "StablecoinX": "StablecoinX",
+  "Mantle Bank": "Mantle Bank DVN",
+};
+
 /** Resolve a DVN address to its canonical name, keyed by the chain's chainKey string.
  *  Falls back to globalFallback (same name on every chain) then address fragment.
  *  chainKey must be the LZ deployments chainKey (e.g. "mantle", "ethereum"), not a numeric ID. */
 export function resolveDvn(addr: string, chainKey: string | null, meta: DvnMeta): string {
   const key = addr.toLowerCase();
-  if (chainKey && meta.byChain[chainKey]?.[key]) return meta.byChain[chainKey][key].name;
-  return meta.globalFallback[key] ?? `${addr.slice(0, 8)}…`;
+  const raw = (chainKey && meta.byChain[chainKey]?.[key]?.name)
+    ?? meta.globalFallback[key]
+    ?? null;
+  if (!raw) return `${addr.slice(0, 8)}…`;
+  return FRIENDLY_DVN[raw] ?? raw;
 }
 
 export function isDvnDeprecated(addr: string, chainKey: string | null, meta: DvnMeta): boolean {
