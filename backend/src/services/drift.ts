@@ -135,11 +135,11 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     }
 
     // ── Self-DVN detection ───────────────────────────────────────────────────
-    // A protocol running one of its own required DVNs means it can verify its
-    // own messages — defeating the independence assumption. LOW because it's
-    // intentional (e.g. USDT0 DVN), not a configuration error, but a material
-    // trust assumption that should surface in reports.
-    if (ticker) {
+    // A protocol's own DVN in a 3-of-3+ set is additive security — they verify
+    // on top of 2+ independent checkers. Only flag when it's in a 2-of-2 set,
+    // where it reduces the effective independent verifier count to one.
+    // 1-of-1 self-DVN is already caught as CRITICAL above.
+    if (ticker && uln.requiredDVNCount === 2) {
       const tickerLower = ticker.toLowerCase();
       for (const dvnAddr of uln.requiredDVNs) {
         const name = resolveDvn(dvnAddr, srcChainKey, dvnMeta).toLowerCase();
@@ -147,9 +147,9 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
           findings.push({
             severity: "LOW",
             check: "Self-DVN",
-            detail: `${route.chainName}: "${resolveDvn(dvnAddr, srcChainKey, dvnMeta)}" is operated by the protocol — reduces DVN independence.`,
+            detail: `${route.chainName}: "${resolveDvn(dvnAddr, srcChainKey, dvnMeta)}" is operated by the protocol in a 2-of-2 set — one independent verifier remaining.`,
           });
-          break; // one finding per route, not per DVN
+          break;
         }
       }
     }
@@ -252,13 +252,8 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         check: "Proxy Upgrade Control",
         detail: `Proxy admin owner is an EOA (${snap.proxyAdminOwner?.slice(0, 10)}…) — a single key can upgrade the implementation.`,
       });
-    } else if (snap.proxyAdminIsMultisig === true) {
-      findings.push({
-        severity: "MEDIUM",
-        check: "Proxy Upgrade Control",
-        detail: `Proxy upgradeable — controlled by a multisig (${snap.proxyAdminOwner?.slice(0, 10)}…). Verify threshold and signer set.`,
-      });
     }
+    // Multisig-controlled proxy is the recommended configuration — no deduction.
   }
 
   let score = computeScore(findings);

@@ -118,7 +118,7 @@ export function telegramRecipients(v: SentinelVerdict): { publicChatId: string |
   return { publicChatId, teamChatIds };
 }
 
-async function sendTelegram(chatId: string | null, text: string, label: string): Promise<void> {
+export async function sendTelegram(chatId: string | null, text: string, label: string): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token || !chatId) {
     console.log(`[alert:telegram:${label}:mock] ${text}`);

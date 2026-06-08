@@ -1,7 +1,7 @@
 import type { OftSnapshot, RouteSnapshot, WatchedOft, SentinelVerdict } from "../types.js";
 import { readSnapshot } from "./lz-config.js";
 import { assessSnapshot } from "./drift.js";
-import { runCheck } from "./orchestrator.js";
+import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
 import { putSnapshot, appendScoreHistory } from "./snapshot-store.js";
 import { getSentinelWatchlist } from "./dune.js";
 
@@ -54,8 +54,12 @@ export async function pollOnce(): Promise<void> {
       try {
         const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
         // Record score history on every poll cycle.
-        const { score, riskLevel } = await assessSnapshot(snap, w.ticker);
+        const { score, riskLevel, findings } = await assessSnapshot(snap, w.ticker);
         appendScoreHistory({ oft: w.address, chainId: w.chainId, score, riskLevel, capturedAt: snap.capturedAt });
+        // Attest + alert for persistently weak configs (score < 50) on every poll.
+        if (score < 50) {
+          await produceWeakConfigAttestation(w, snap, findings, score, riskLevel);
+        }
         await runCheck(w, snap);
       } catch (e: any) {
         console.error(`[sentinel] poll failed for ${w.ticker}:`, e.shortMessage ?? e.message);

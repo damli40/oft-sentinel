@@ -662,7 +662,8 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
   const latest    = verdicts[0] ?? null;
   const criticals = status?.watched.filter(w => riskLevel(w) === "crit") ?? [];
 
-  const sorted = [...(status?.watched ?? [])].sort((a, b) => {
+  const assessed = (status?.watched ?? []).filter(w => w.assessment !== null);
+  const sorted = [...assessed].sort((a, b) => {
     const order = { crit: 0, warn: 1, safe: 2, scan: 3 };
     return order[riskLevel(a)] - order[riskLevel(b)] || (a.assessment?.score ?? 100) - (b.assessment?.score ?? 100);
   });
@@ -701,7 +702,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
 
             {/* DVN Concentration Panel */}
             <DvnConcentrationPanel
-              fleet={status?.watched ?? []}
+              fleet={assessed}
               selectedDvn={selectedDvn}
               onSelect={setSelectedDvn}
             />
@@ -717,7 +718,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                       className={filter === f ? "on" : ""}
                       onClick={() => setFilter(f)}
                     >
-                      {f === "all" ? `All ${status?.watched.length ?? 28}` : f === "crit" ? "Critical" : f === "warn" ? "At risk" : "Safe"}
+                      {f === "all" ? `All ${assessed.length}` : f === "crit" ? "Critical" : f === "warn" ? "At risk" : "Safe"}
                     </button>
                   ))}
                 </div>
