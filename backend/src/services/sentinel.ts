@@ -9,24 +9,29 @@ const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
 const POLL_CONCURRENCY = 6; // OFTs read in parallel per cycle (bounds RPC load)
 
+// Synthetic OFT used exclusively for the Kelp replay demo.
+// Never polled for real on-chain config — snapshot is injected by runKelpReplay.
+const KELP_DEMO_OFT: WatchedOft = {
+  ticker: "DEMO",
+  address: "0x0000000000000000000000000000000000001337",
+  chainId: MANTLE_CHAIN_ID,
+};
+
 // Watchlist: OFTs with 10+ messages in the past 7 days from the sentinel Dune query.
 // Dormant and test contracts are excluded before they reach the polling loop.
 let watchedCache: { at: number; list: WatchedOft[] } | null = null;
 const WATCHED_TTL = 10 * 60_000;
 
 export async function getWatched(force = false): Promise<WatchedOft[]> {
-  if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL) return watchedCache.list;
+  if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL)
+    return [...watchedCache.list, KELP_DEMO_OFT];
   const ofts = await getSentinelWatchlist(force).catch(() => []);
   const list = ofts
     .filter((o) => o.address && /^0x[0-9a-fA-F]{40}$/.test(o.address))
     .map((o) => ({ ticker: o.ticker, address: o.address as string, chainId: MANTLE_CHAIN_ID }));
   if (list.length) watchedCache = { at: Date.now(), list };
-  return list;
-}
-
-async function findWatched(ticker: string): Promise<WatchedOft | undefined> {
-  const list = await getWatched();
-  return list.find((w) => w.ticker.toLowerCase() === ticker.toLowerCase());
+  // DEMO is always appended — not in Dune, not polled, used only for replay.
+  return [...list, KELP_DEMO_OFT];
 }
 
 /** Run `fn` over `items` with at most `limit` in flight at once. */
@@ -50,7 +55,7 @@ export async function pollOnce(): Promise<void> {
   try {
     const watched = await getWatched();
     console.log(`[sentinel] polling ${watched.length} OFTs on Mantle (${MANTLE_CHAIN_ID})`);
-    await mapLimit(watched, POLL_CONCURRENCY, async (w) => {
+    await mapLimit(watched.filter((w) => w.ticker !== "DEMO"), POLL_CONCURRENCY, async (w) => {
       try {
         const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
         // Record score history on every poll cycle.
@@ -129,9 +134,8 @@ function makeSnapshot(oft: string, chainId: number, requiredDVNCount: number): O
   };
 }
 
-export async function runKelpReplay(ticker = "cmETH"): Promise<SentinelVerdict> {
-  const w = await findWatched(ticker);
-  if (!w) throw new Error(`Unknown watched OFT: ${ticker}`);
+export async function runKelpReplay(): Promise<SentinelVerdict> {
+  const w = KELP_DEMO_OFT;
 
   // 1. Seed a healthy 2-of-2 baseline.
   putSnapshot(makeSnapshot(w.address, w.chainId, 2));
@@ -167,9 +171,8 @@ function makeSnapshotLibRevert(oft: string, chainId: number): OftSnapshot {
   };
 }
 
-export async function runLibraryRevertReplay(ticker = "cmETH"): Promise<SentinelVerdict> {
-  const w = await findWatched(ticker);
-  if (!w) throw new Error(`Unknown watched OFT: ${ticker}`);
+export async function runLibraryRevertReplay(): Promise<SentinelVerdict> {
+  const w = KELP_DEMO_OFT;
 
   // 1. Seed a healthy baseline (both libraries pinned).
   putSnapshot(makeSnapshot(w.address, w.chainId, 2));

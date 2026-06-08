@@ -50,7 +50,7 @@ export interface WatchedStatus {
   lastSnapshotAt: number | null;
   assessment: { score: number; riskLevel: "PASS" | "AT_RISK" | "CRITICAL" } | null;
   latestVerdict: SentinelVerdict | null;
-  dvnSummary: { requiredCount: number; requiredDVNs: string[] } | null;
+  dvnSummary: { requiredCount: number; optionalThreshold: number; effectiveCount: number; requiredDVNs: string[]; optionalDVNs: string[] } | null;
   dvnNames: Record<string, string> | null;
 }
 
@@ -90,11 +90,11 @@ export async function getSentinelVerdicts(): Promise<SentinelVerdict[]> {
   return (await res.json()).verdicts ?? [];
 }
 
-export async function runKelpReplay(ticker: string): Promise<SentinelVerdict> {
+export async function runKelpReplay(): Promise<SentinelVerdict> {
   const res = await fetch(`${BASE}/sentinel/replay-kelp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ticker }),
+    body: "{}",
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

@@ -21,7 +21,7 @@ const CORRIDORS = ["ethereum", "hyperliquid", "polygon", "arbitrum", "base", "op
 type RiskLvl = "crit" | "warn" | "safe" | "scan";
 
 function riskLevel(w: WatchedStatus): RiskLvl {
-  if (!w.assessment) return "scan";
+  if (!w.assessment || !w.dvnSummary) return "scan";
   const r = w.assessment.riskLevel;
   if (r === "CRITICAL") return "crit";
   if (r === "AT_RISK")  return "warn";
@@ -212,6 +212,17 @@ function IntelFeed({ events }: { events: FeedEvent[] }) {
   );
 }
 
+function formatMd(text: string): string {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+?)\*/g, "<em>$1</em>")
+    .replace(/\n/g, "<br>");
+}
+
 // ── Security Copilot ──────────────────────────────────────────────────────────
 
 const COPILOT_CHIPS = [
@@ -282,9 +293,11 @@ function SecurityCopilot({ onClose }: CopilotProps) {
           >✕</button>
         </div>
         <div className="copilot-msgs">
-          {messages.map((m, i) => (
-            <div key={i} className={`cop-msg ${m.role}`}>{m.text}</div>
-          ))}
+          {messages.map((m, i) =>
+            m.role === "assistant"
+              ? <div key={i} className="cop-msg assistant" dangerouslySetInnerHTML={{ __html: formatMd(m.text) }} />
+              : <div key={i} className="cop-msg user">{m.text}</div>
+          )}
           {busy && (
             <div className="cop-msg assistant">
               <span className="cop-typing">Analyzing…</span>
@@ -632,10 +645,10 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
   async function handleReplay() {
     setError("");
     setBusy("replay");
-    addLog(mkLine("ok", "✓", "baseline seeded, cmETH 2-of-2", "· healthy"));
+    addLog(mkLine("ok", "✓", "baseline seeded, DEMO 2-of-2", "· healthy"));
     try {
-      await runKelpReplay("cmETH");
-      addLog(mkLine("alert", "⚠", "DRIFT DETECTED: cmETH"));
+      await runKelpReplay();
+      addLog(mkLine("alert", "⚠", "DRIFT DETECTED: DEMO"));
       setTimeout(() => addLog(mkLine("alert", "", "DVN count dropped 2 → 1")), 500);
       await refresh();
       setTimeout(() => addLog(mkLine("ok", "✓", "attested · alert dispatched")), 1200);
@@ -766,7 +779,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                             </div>
                           </div>
                           <div className="mid">
-                            <div className="sc">{pad(score)}</div>
+                            <div className="sc">{lvl === "scan" ? "—" : pad(score)}</div>
                             <span className={spillClass(lvl)} style={{ padding: "3px 7px" }}>
                               <span className="d" />
                               {spillLabel(lvl)}

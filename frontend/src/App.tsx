@@ -331,8 +331,11 @@ function Header({ view, onNav }: { view: View; onNav: (v: string) => void }) {
         <span className="live-dot" />
         <span id="hdrStatus">SENTINEL ACTIVE · 28 OFTs</span>
       </div>
-      <button className="btn btn-primary btn-sm" onClick={() => onNav("sentinel")}>
+      <button className="btn btn-primary btn-sm appbar-cta" onClick={() => onNav("sentinel")}>
         Open the Sentinel →
+      </button>
+      <button className="btn btn-ghost btn-sm appbar-kelp" onClick={() => onNav("sentinel")}>
+        ▶ Kelp replay
       </button>
     </header>
   );

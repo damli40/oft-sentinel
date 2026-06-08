@@ -153,15 +153,26 @@ export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) 
               <div>
                 <div className="to-sec-lbl">DVN Configuration</div>
                 <div className="to-dvn-thresh">
-                  Required: <b>{watched.dvnSummary.requiredCount}-of-{watched.dvnSummary.requiredDVNs.length}</b> DVNs
-                  {watched.dvnSummary.requiredCount === 1 && watched.dvnSummary.requiredDVNs.length <= 1 && (
+                  {watched.dvnSummary.optionalThreshold > 0 ? (
+                    <>
+                      Effective: <b>{watched.dvnSummary.effectiveCount} DVNs</b>
+                      <span style={{ color: "var(--faint)", marginLeft: 6, fontSize: 11 }}>
+                        ({watched.dvnSummary.requiredCount} required + {watched.dvnSummary.optionalThreshold}-of-{watched.dvnSummary.optionalDVNs.length} optional)
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      Required: <b>{watched.dvnSummary.requiredCount}-of-{watched.dvnSummary.requiredDVNs.length}</b> DVNs
+                    </>
+                  )}
+                  {watched.dvnSummary.effectiveCount <= 1 && (
                     <span style={{ color: "var(--critical)", marginLeft: 8, fontSize: 11 }}>⚠ single point of failure</span>
                   )}
                 </div>
                 <div>
                   {watched.dvnSummary.requiredDVNs.map((addr, i) => {
                     const name = watched.dvnNames?.[addr] ?? `DVN ${i + 1}`;
-                    const bad = watched.dvnSummary!.requiredCount === 1 && watched.dvnSummary!.requiredDVNs.length <= 1;
+                    const bad = watched.dvnSummary!.effectiveCount <= 1;
                     return (
                       <div key={addr} className="to-dvn-row">
                         <div>
@@ -169,8 +180,20 @@ export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) 
                           <div className="to-dvn-ad">{addr.slice(0, 10)}…{addr.slice(-6)}</div>
                         </div>
                         <span className={`to-dvn-st ${bad ? "bad" : "ok"}`}>
-                          {bad ? "⚠ sole checker" : "✓ active"}
+                          {bad ? "⚠ sole checker" : "✓ required"}
                         </span>
+                      </div>
+                    );
+                  })}
+                  {watched.dvnSummary.optionalDVNs?.map((addr, i) => {
+                    const name = watched.dvnNames?.[addr] ?? `Optional DVN ${i + 1}`;
+                    return (
+                      <div key={addr} className="to-dvn-row">
+                        <div>
+                          <div className="to-dvn-nm">{name}</div>
+                          <div className="to-dvn-ad">{addr.slice(0, 10)}…{addr.slice(-6)}</div>
+                        </div>
+                        <span className="to-dvn-st opt">optional</span>
                       </div>
                     );
                   })}

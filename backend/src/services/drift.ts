@@ -27,8 +27,9 @@ export async function detectDrift(prev: OftSnapshot, next: OftSnapshot): Promise
     if (!before) {
       // Newly active route: flag if it starts in a risky state.
       if (route.uln) {
-        if (route.uln.requiredDVNCount <= 1) {
-          reasons.push(`${route.chainName}: new route added with 1-of-1 required DVN — single point of failure`);
+        const newEffective = route.uln.requiredDVNCount + (route.uln.optionalDVNThreshold ?? 0);
+        if (newEffective <= 1) {
+          reasons.push(`${route.chainName}: new route added with 1-of-1 effective DVN — single point of failure`);
         }
         for (const dvnAddr of route.uln.requiredDVNs) {
           if (isDvnDeprecated(dvnAddr, srcChainKey, dvnMeta)) {
@@ -45,7 +46,11 @@ export async function detectDrift(prev: OftSnapshot, next: OftSnapshot): Promise
     // "missing" to 0 would read as a downgrade and fire a false CRITICAL that gets
     // attested on-chain (real tx + MNT spend). Skip the comparison instead of guessing.
     if (before.uln && route.uln) {
-      if (route.uln.requiredDVNCount < before.uln.requiredDVNCount) {
+      const prevEffective = before.uln.requiredDVNCount + (before.uln.optionalDVNThreshold ?? 0);
+      const nextEffective = route.uln.requiredDVNCount + (route.uln.optionalDVNThreshold ?? 0);
+      if (nextEffective < prevEffective) {
+        reasons.push(`${route.chainName}: effective DVN count dropped ${prevEffective} → ${nextEffective}`);
+      } else if (route.uln.requiredDVNCount < before.uln.requiredDVNCount) {
         reasons.push(`${route.chainName}: required DVN count dropped ${before.uln.requiredDVNCount} → ${route.uln.requiredDVNCount}`);
       }
       if (route.uln.confirmations < before.uln.confirmations) {
@@ -106,18 +111,21 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     const dstChainKey = route.chainKey; // destination chainKey — for DVN name lookup on dst
 
     // ── DVN count ───────────────────────────────────────────────────────────
+    // Effective security = required DVNs + optional DVNs that must all sign (threshold).
+    // e.g. 2 required + 3 optional threshold 2 → 4 distinct verifiers must agree.
+    const effectiveDvnCount = uln.requiredDVNCount + (uln.optionalDVNThreshold ?? 0);
     const reqNames = uln.requiredDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta)).join(", ");
-    if (uln.requiredDVNCount <= 1) {
+    if (effectiveDvnCount <= 1) {
       findings.push({
         severity: "CRITICAL",
         check: "DVN Count",
-        detail: `${route.chainName}: 1-of-1 required DVN (${reqNames || "unresolved"}) — single point of failure (Kelp rsETH exploit pattern).`,
+        detail: `${route.chainName}: 1-of-1 effective DVN (${reqNames || "unresolved"}) — single point of failure (Kelp rsETH exploit pattern).`,
       });
-    } else if (uln.requiredDVNCount === 2) {
+    } else if (effectiveDvnCount === 2) {
       findings.push({
         severity: "MEDIUM",
         check: "DVN Count",
-        detail: `${route.chainName}: 2-of-2 required DVNs (${reqNames}) — minimal redundancy.`,
+        detail: `${route.chainName}: 2 effective DVNs (${reqNames}) — minimal redundancy.`,
       });
     }
 
@@ -136,10 +144,10 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
 
     // ── Self-DVN detection ───────────────────────────────────────────────────
     // A protocol's own DVN in a 3-of-3+ set is additive security — they verify
-    // on top of 2+ independent checkers. Only flag when it's in a 2-of-2 set,
+    // on top of 2+ independent checkers. Only flag when effective count is 2,
     // where it reduces the effective independent verifier count to one.
     // 1-of-1 self-DVN is already caught as CRITICAL above.
-    if (ticker && uln.requiredDVNCount === 2) {
+    if (ticker && effectiveDvnCount === 2) {
       const tickerLower = ticker.toLowerCase();
       for (const dvnAddr of uln.requiredDVNs) {
         const name = resolveDvn(dvnAddr, srcChainKey, dvnMeta).toLowerCase();

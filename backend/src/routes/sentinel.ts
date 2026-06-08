@@ -38,6 +38,8 @@ router.get("/status", async (_req: Request, res: Response) => {
     const snap = getSnapshot(w.address, w.chainId);
     const a = snap ? await assessSnapshot(snap, w.ticker) : null;
     const firstUln = snap?.routes[0]?.uln;
+    // DVN addresses in send config are on the source chain (Mantle) — always resolve with "mantle".
+    const srcChainKey = "mantle";
     return {
       ...w,
       lastSnapshotAt: snap?.capturedAt ?? null,
@@ -45,10 +47,13 @@ router.get("/status", async (_req: Request, res: Response) => {
       latestVerdict: latestVerdict(w.address, w.chainId),
       dvnSummary: firstUln ? {
         requiredCount: firstUln.requiredDVNCount,
+        optionalThreshold: firstUln.optionalDVNThreshold,
+        effectiveCount: firstUln.requiredDVNCount + (firstUln.optionalDVNThreshold ?? 0),
         requiredDVNs: firstUln.requiredDVNs,
+        optionalDVNs: firstUln.optionalDVNs,
       } : null,
       dvnNames: firstUln ? Object.fromEntries(
-        firstUln.requiredDVNs.map((a) => [a, resolveDvn(a, snap!.routes[0].chainKey, dvnMeta)])
+        [...firstUln.requiredDVNs, ...firstUln.optionalDVNs].map((a) => [a, resolveDvn(a, srcChainKey, dvnMeta)])
       ) : null,
     };
   }));
@@ -91,10 +96,9 @@ router.post("/poll", async (_req: Request, res: Response) => {
 
 // POST /api/sentinel/replay-kelp — the demo: seed healthy → inject 1-of-1 →
 // verdict flips CRITICAL → real attestation on Mantle Sepolia.
-router.post("/replay-kelp", async (req: Request, res: Response) => {
+router.post("/replay-kelp", async (_req: Request, res: Response) => {
   try {
-    const ticker = (req.body?.ticker as string) ?? "cmETH";
-    const verdict = await runKelpReplay(ticker);
+    const verdict = await runKelpReplay();
     res.json({ ok: true, verdict });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -103,10 +107,9 @@ router.post("/replay-kelp", async (req: Request, res: Response) => {
 
 // POST /api/sentinel/replay-library-revert — demo: seed healthy (pinned libs) →
 // inject snapshot where receive library reverted to default → CRITICAL verdict.
-router.post("/replay-library-revert", async (req: Request, res: Response) => {
+router.post("/replay-library-revert", async (_req: Request, res: Response) => {
   try {
-    const ticker = (req.body?.ticker as string) ?? "cmETH";
-    const verdict = await runLibraryRevertReplay(ticker);
+    const verdict = await runLibraryRevertReplay();
     res.json({ ok: true, verdict });
   } catch (e: any) {
     res.status(500).json({ error: e.message });

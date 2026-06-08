@@ -25,6 +25,7 @@
 .appbar .nav button:hover { color: var(--text); background: var(--surface-2); }
 .appbar .nav button.on { color: var(--text); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); }
 .appbar .spacer { flex: 1; }
+.appbar .appbar-kelp { display: none; }
 .appbar .status-chip {
   display: flex; align-items: center; gap: 9px;
   font-family: var(--mono); font-size: 11px; letter-spacing: .08em; color: var(--scan);
@@ -120,3 +121,97 @@
 .flow-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
 
 footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(--border-soft); display: flex; justify-content: space-between; align-items: center; gap: 20px; color: var(--faint); font-size: 12.5px; flex-wrap: wrap; }
+
+/* ============================================================
+   TABLET  (≤ 768px)
+   ============================================================ */
+@media (max-width: 768px){
+  .appbar { padding: 10px 16px; gap: 12px; }
+  .appbar .nav button { font-size: 12px; padding: 6px 10px; }
+  .appbar .status-chip { font-size: 10px; padding: 5px 10px; }
+  .appbar .appbar-cta { display: none; }
+  .appbar .appbar-kelp { display: inline-flex; }
+
+  .hero { padding: 48px 0 36px; gap: 32px; }
+  .hero h1 { font-size: 38px; }
+  .hero .lede { font-size: 15px; }
+  .hero .cta-row { flex-wrap: wrap; gap: 10px; }
+  .hero .cta-row .btn { flex: 1; min-width: 140px; justify-content: center; }
+  .hero .live-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
+  .hero .live-strip .stat .v { font-size: 20px; }
+  .hero .radar-card { max-width: 100%; aspect-ratio: 16/7; }
+
+  .props { grid-template-columns: 1fr; gap: 12px; }
+
+  .flow-box { height: 200px; }
+  .flow-legend { gap: 14px; }
+  .flow-legend span { font-size: 10px; }
+  .sec-title { flex-direction: column; gap: 4px; margin: 40px 0 16px; }
+  .sec-title .meta { margin-left: 0; }
+
+  .board { overflow-x: auto; }
+  .board .addr { display: none; }
+  .board th, .board td { padding: 11px 12px; font-size: 12px; }
+
+  .cta-band { padding: 28px 24px; flex-direction: column; gap: 20px; }
+  .cta-band h2 { font-size: 20px; }
+  .cta-band .btn { width: 100%; justify-content: center; }
+
+  footer.foot { flex-direction: column; align-items: flex-start; gap: 8px; padding: 28px 0 40px; }
+
+  /* overlays as bottom sheets */
+  .token-overlay { padding: 0; align-items: flex-end; }
+  .to-panel { max-width: 100%; border-radius: 20px 20px 0 0; max-height: 88vh; }
+  .to-main { grid-template-columns: 1fr; }
+  .to-score-col { border-right: none; border-bottom: 1px solid var(--border-soft); flex-direction: row; justify-content: flex-start; padding: 16px 18px; gap: 16px; }
+  .to-rl { flex: 1; }
+  .to-hd { padding: 14px 18px; }
+  .to-tkn { font-size: 18px; }
+
+  .copilot-overlay { padding: 0; align-items: flex-end; justify-content: stretch; }
+  .copilot-panel { width: 100%; border-radius: 20px 20px 0 0; height: 72vh; max-height: 72vh; }
+
+  .modal-bg { align-items: flex-end; padding: 0; }
+  .modal { width: 100%; border-radius: 20px 20px 0 0; }
+}
+
+/* ============================================================
+   PHONE  (≤ 480px)
+   ============================================================ */
+@media (max-width: 480px){
+  .page { padding: 0 14px; }
+
+  .appbar { padding: 10px 14px; }
+  .appbar .status-chip { display: none; }
+  .appbar .nav button { padding: 6px 8px; font-size: 11px; }
+
+  .hero { padding: 36px 0 24px; }
+  .hero h1 { font-size: 30px; line-height: 1.08; }
+  .hero .kicker { font-size: 9px; }
+  .hero .lede { font-size: 14px; }
+  .hero .live-strip { gap: 12px 20px; }
+  .hero .live-strip .stat .v { font-size: 18px; }
+  .hero .live-strip .stat .l { font-size: 10px; }
+  .hero .radar-card { aspect-ratio: 16/6; }
+
+  .prop { padding: 18px; }
+  .prop h3 { font-size: 15px; }
+
+  .flow-box { height: 160px; }
+  .sec-title h2 { font-size: 18px; }
+
+  .board th, .board td { padding: 9px 10px; font-size: 11.5px; }
+  .board .vol { font-size: 11px; }
+
+  .cta-band { padding: 22px 18px; }
+  .cta-band h2 { font-size: 17px; }
+  .cta-band p { font-size: 13px; }
+
+  /* overlays */
+  .to-score-col { flex-direction: column; align-items: flex-start; }
+  .to-detail-col { padding: 16px 18px; }
+  .to-actions { flex-wrap: wrap; }
+  .to-actions .btn { flex: none; width: 100%; }
+  .copilot-panel { height: 80vh; max-height: 80vh; }
+  .cop-chip { white-space: normal; }
+}

@@ -231,23 +231,27 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
   const srcChainKey = eidMap[MANTLE_EID]?.chainKey ?? "mantle";
 
   // ── Step 1: sweep ALL known V2 EVM EIDs to find active routes ───────────
+  // Batched to 25 concurrent calls — prevents Mantle RPC rate-limiting when
+  // multiple OFTs are polled in parallel (each sweeping 170+ EIDs simultaneously).
   const activeEids: number[] = [];
   const peerAddresses: Record<number, string> = {};
+  const EID_BATCH = 25;
 
-  await Promise.all(
-    Object.keys(eidMap).map(async (eidStr) => {
-      const eid = Number(eidStr);
-      if (eid === MANTLE_EID) return; // skip self
-      try {
-        const r = await rawCall(srcClient, oftAddr, SEL.peers + padU32(eid));
-        if (r && r !== "0x" && BigInt(r) !== 0n) {
-          activeEids.push(eid);
-          // peers() returns bytes32 — last 20 bytes are the peer OFT address
-          peerAddresses[eid] = getAddress("0x" + r.slice(-40));
-        }
-      } catch { /* no peer for this eid */ }
-    })
-  );
+  const allEids = Object.keys(eidMap).map(Number).filter((e) => e !== MANTLE_EID);
+  for (let i = 0; i < allEids.length; i += EID_BATCH) {
+    await Promise.all(
+      allEids.slice(i, i + EID_BATCH).map(async (eid) => {
+        try {
+          const r = await rawCall(srcClient, oftAddr, SEL.peers + padU32(eid));
+          if (r && r !== "0x" && BigInt(r) !== 0n) {
+            activeEids.push(eid);
+            // peers() returns bytes32 — last 20 bytes are the peer OFT address
+            peerAddresses[eid] = getAddress("0x" + r.slice(-40));
+          }
+        } catch { /* no peer for this eid */ }
+      })
+    );
+  }
 
   // ── Step 2: read send-side ULN for each active route ─────────────────────
   const routes: RouteSnapshot[] = [];
