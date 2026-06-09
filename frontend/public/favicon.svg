@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- dark background -->
+  <rect width="100" height="100" rx="22" fill="#0D1117"/>
+  <!-- outer ring -->
+  <circle cx="50" cy="50" r="44" fill="none" stroke="#1F2630" stroke-width="2.2"/>
+  <!-- scan arc -->
+  <circle cx="50" cy="50" r="44" fill="none" stroke="#5BE7F0" stroke-width="2.8"
+    stroke-linecap="round" stroke-dasharray="62 214" transform="rotate(-96 50 50)"/>
+  <!-- outer hex -->
+  <polygon points="50,20 76,35 76,65 50,80 24,65 24,35"
+    fill="none" stroke="#2A323D" stroke-width="2.4" stroke-linejoin="round"/>
+  <!-- inner hex -->
+  <polygon points="50,30 67,40 67,60 50,70 33,60 33,40"
+    fill="none" stroke="#5BE7F0" stroke-width="1.4" stroke-linejoin="round" opacity="0.4"/>
+  <!-- core glow ring -->
+  <circle cx="50" cy="50" r="13" fill="none" stroke="#5BE7F0" stroke-width="1.2" opacity="0.45"/>
+  <!-- core dot -->
+  <circle cx="50" cy="50" r="7" fill="#5BE7F0"/>
+</svg>
