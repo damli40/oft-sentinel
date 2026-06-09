@@ -22,7 +22,7 @@ const CORRIDORS = ["ethereum", "hyperliquid", "polygon", "arbitrum", "base", "op
 type RiskLvl = "crit" | "warn" | "safe" | "scan";
 
 function riskLevel(w: WatchedStatus): RiskLvl {
-  if (!w.assessment || !w.dvnSummary) return "scan";
+  if (!w.assessment) return "scan";
   const r = w.assessment.riskLevel;
   if (r === "CRITICAL") return "crit";
   if (r === "AT_RISK")  return "warn";

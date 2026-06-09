@@ -67,6 +67,13 @@ export async function pollOnce(): Promise<void> {
     await mapLimit(watched.filter((w) => w.ticker !== "DEMO"), POLL_CONCURRENCY, async (w) => {
       try {
         const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
+        // Skip storing if every active route returned a null ULN — indicates a failed
+        // RPC read. Storing would overwrite a good baseline with incomplete data.
+        const hasAnyUln = snap.routes.some(r => r.isActive && r.uln !== null);
+        if (!hasAnyUln && snap.routes.some(r => r.isActive)) {
+          console.warn(`[sentinel] ${w.ticker}: all ULN reads returned null — skipping putSnapshot`);
+          return;
+        }
         // Record score history on every poll cycle.
         const { score, riskLevel, findings, tis } = await assessSnapshot(snap, w.ticker);
         appendScoreHistory({ oft: w.address, chainId: w.chainId, score, riskLevel, capturedAt: snap.capturedAt });
