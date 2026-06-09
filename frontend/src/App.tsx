@@ -100,6 +100,17 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
   const criticals = status?.watched.filter(w => w.assessment?.riskLevel === "CRITICAL").length ?? 0;
   const lastPollMs = status?.watched.reduce((m, w) => Math.max(m, w.lastSnapshotAt ?? 0), 0) ?? 0;
 
+  // tick "last poll" every second via DOM — no re-render
+  const lastPollRef = useRef(lastPollMs);
+  lastPollRef.current = lastPollMs;
+  useEffect(() => {
+    const id = setInterval(() => {
+      const el = document.getElementById("s-last");
+      if (el) el.textContent = lastPollRef.current ? ago(lastPollRef.current) : "-";
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   const animVol = useCountUp(totalVol / 1e9, 1400);
   const animOfts = useCountUp(oftsWatched, 1200);
   const animCrit = useCountUp(criticals, 1000);

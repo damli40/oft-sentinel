@@ -12,7 +12,8 @@ function shortAddr(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
-function getStatusCls(w?: WatchedStatus): string {
+function getStatusCls(monitored: boolean, w?: WatchedStatus): string {
+  if (!monitored) return "spill s-ghost";
   if (!w?.assessment) return "spill s-scan";
   const r = w.assessment.riskLevel;
   if (r === "CRITICAL") return "spill s-crit";
@@ -20,7 +21,8 @@ function getStatusCls(w?: WatchedStatus): string {
   return "spill s-safe";
 }
 
-function getStatusLabel(w?: WatchedStatus): string {
+function getStatusLabel(monitored: boolean, w?: WatchedStatus): string {
+  if (!monitored) return "Not monitored";
   if (!w?.assessment) return "Scanning";
   const r = w.assessment.riskLevel;
   if (r === "CRITICAL") return "Critical";
@@ -70,6 +72,7 @@ export function MantleBoard({ ofts, error, status, onPick }: Props) {
           )}
           {sorted.map((o, i) => {
             const w = statusMap.get(o.ticker.toUpperCase());
+            const monitored = !!o.address;
             return (
               <tr key={o.oftName} onClick={() => onPick(o.ticker)}>
                 <td className="rank">{String(i + 1).padStart(2, "0")}</td>
@@ -80,9 +83,9 @@ export function MantleBoard({ ofts, error, status, onPick }: Props) {
                 <td className="addr">{o.address ? shortAddr(o.address) : o.oftName || '—'}</td>
                 <td className="vol">{formatUsd(o.usdVolume)}</td>
                 <td style={{ textAlign: "right" }}>
-                  <span className={getStatusCls(w)}>
-                    <span className="d" />
-                    {getStatusLabel(w)}
+                  <span className={getStatusCls(monitored, w)}>
+                    {monitored && <span className="d" />}
+                    {getStatusLabel(monitored, w)}
                   </span>
                 </td>
               </tr>
