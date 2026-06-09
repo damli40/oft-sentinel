@@ -39,13 +39,47 @@ router.get("/status", async (_req: Request, res: Response) => {
   const watched = await Promise.all(list.map(async (w) => {
     const snap = getSnapshot(w.address, w.chainId);
     const a = snap ? await assessSnapshot(snap, w.ticker) : null;
-    const firstUln = snap?.routes[0]?.uln;
     // DVN addresses in send config are on the source chain (Mantle) — always resolve with "mantle".
     const srcChainKey = "mantle";
+    // Per-corridor DVN breakdown: one entry per active route, null when ULN is unreadable.
+    const activeRoutes = snap?.routes.filter(r => r.isActive) ?? [];
+    const dvnCorridors = activeRoutes.length > 0
+      ? activeRoutes.map(r => {
+          if (!r.uln) return { corridor: r.chainName, eid: r.eid, uln: null };
+          const names = Object.fromEntries(
+            [...r.uln.requiredDVNs, ...r.uln.optionalDVNs].map(addr => [addr, resolveDvn(addr, srcChainKey, dvnMeta)])
+          );
+          return {
+            corridor: r.chainName,
+            eid: r.eid,
+            uln: {
+              requiredCount: r.uln.requiredDVNCount,
+              optionalThreshold: r.uln.optionalDVNThreshold,
+              effectiveCount: r.uln.requiredDVNCount + (r.uln.optionalDVNThreshold ?? 0),
+              requiredDVNs: r.uln.requiredDVNs,
+              optionalDVNs: r.uln.optionalDVNs,
+              names,
+            },
+          };
+        })
+      : null;
+    // dvnSummary: first corridor with a readable ULN (for backward-compat summary panels).
+    const firstReadable = activeRoutes.find(r => r.uln !== null);
+    const firstUln = firstReadable?.uln ?? null;
+    const dvnSummary = firstUln ? {
+      requiredCount: firstUln.requiredDVNCount,
+      optionalThreshold: firstUln.optionalDVNThreshold,
+      effectiveCount: firstUln.requiredDVNCount + (firstUln.optionalDVNThreshold ?? 0),
+      requiredDVNs: firstUln.requiredDVNs,
+      optionalDVNs: firstUln.optionalDVNs,
+    } : null;
+    const dvnNames = firstUln ? Object.fromEntries(
+      [...firstUln.requiredDVNs, ...firstUln.optionalDVNs].map((addr) => [addr, resolveDvn(addr, srcChainKey, dvnMeta)])
+    ) : null;
     return {
       ...w,
       lastSnapshotAt: snap?.capturedAt ?? null,
-      corridors: snap?.routes.filter(r => r.isActive).map(r => r.chainName) ?? [],
+      corridors: activeRoutes.map(r => r.chainName),
       assessment: a ? {
         score: a.score,
         riskLevel: a.riskLevel,
@@ -53,16 +87,9 @@ router.get("/status", async (_req: Request, res: Response) => {
         tis: a.tis,
       } : null,
       latestVerdict: latestVerdict(w.address, w.chainId),
-      dvnSummary: firstUln ? {
-        requiredCount: firstUln.requiredDVNCount,
-        optionalThreshold: firstUln.optionalDVNThreshold,
-        effectiveCount: firstUln.requiredDVNCount + (firstUln.optionalDVNThreshold ?? 0),
-        requiredDVNs: firstUln.requiredDVNs,
-        optionalDVNs: firstUln.optionalDVNs,
-      } : null,
-      dvnNames: firstUln ? Object.fromEntries(
-        [...firstUln.requiredDVNs, ...firstUln.optionalDVNs].map((a) => [a, resolveDvn(a, srcChainKey, dvnMeta)])
-      ) : null,
+      dvnSummary,
+      dvnNames,
+      dvnCorridors,
     };
   }));
 

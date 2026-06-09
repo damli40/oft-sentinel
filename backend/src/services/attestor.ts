@@ -103,5 +103,17 @@ export async function attest(
     ? BigInt(attestedLog.topics[1]).toString()
     : "unknown";
 
+  // Post-state: confirm the ID is within the registry's total count.
+  if (attestationId !== "unknown") {
+    try {
+      const total = await pub.readContract({ address: registry, abi: REGISTRY_ABI, functionName: "total" });
+      if (total <= BigInt(attestationId)) {
+        console.warn(`[attestor] post-state mismatch: attestationId=${attestationId} registry total=${total}`);
+      }
+    } catch (e: any) {
+      console.warn(`[attestor] post-state check failed:`, e.shortMessage ?? e.message);
+    }
+  }
+
   return { txHash, attestationId };
 }

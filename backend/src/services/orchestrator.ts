@@ -68,6 +68,7 @@ export async function produceWeakConfigAttestation(
   } catch (e: any) {
     console.error(`[sentinel] weak-config alert failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
   }
+  recordVerdict(verdict);
   weakAlertFired.add(watched.address);
 }
 

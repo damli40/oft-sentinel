@@ -156,7 +156,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     }
 
     const uln = route.uln;
-    if (!uln) continue;
+    if (!uln) {
+      findings.push({
+        severity: "MEDIUM",
+        check: "ULN Unreadable",
+        detail: `${route.chainName}: ${route.sendLibrary ? "ULN config could not be read" : "send library not configured on endpoint"} — DVN and confirmation settings unverifiable on this corridor.`,
+      });
+      continue;
+    }
     const dstChainKey = route.chainKey; // destination chainKey — for DVN name lookup on dst
 
     // ── DVN count ───────────────────────────────────────────────────────────

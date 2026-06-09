@@ -2,12 +2,12 @@ import type { OftSnapshot, RouteSnapshot, WatchedOft, SentinelVerdict } from "..
 import { readSnapshot } from "./lz-config.js";
 import { assessSnapshot } from "./drift.js";
 import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
-import { putSnapshot, appendScoreHistory } from "./snapshot-store.js";
+import { getSnapshot, putSnapshot, appendScoreHistory } from "./snapshot-store.js";
 import { getSentinelWatchlist } from "./dune.js";
 
 const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
-const POLL_CONCURRENCY = 6; // OFTs read in parallel per cycle (bounds RPC load)
+const POLL_CONCURRENCY = 3; // OFTs read in parallel per cycle (bounds RPC load)
 
 // Synthetic OFT used exclusively for the Kelp replay demo.
 // Never polled for real on-chain config — snapshot is injected by runKelpReplay.
@@ -67,6 +67,17 @@ export async function pollOnce(): Promise<void> {
     await mapLimit(watched.filter((w) => w.ticker !== "DEMO"), POLL_CONCURRENCY, async (w) => {
       try {
         const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
+        // Skip storing if peer sweep returned 0 active routes but the stored baseline
+        // has active routes — indicates the EID scan failed under RPC load, not a
+        // genuine config change. Storing would wipe a valid baseline with empty data.
+        const hasActiveRoutes = snap.routes.some(r => r.isActive);
+        if (!hasActiveRoutes) {
+          const existing = getSnapshot(w.address, w.chainId);
+          if (existing?.routes.some(r => r.isActive)) {
+            console.warn(`[sentinel] ${w.ticker}: peer sweep returned 0 active routes — skipping cycle to protect baseline`);
+            return;
+          }
+        }
         // Skip storing if every active route returned a null ULN — indicates a failed
         // RPC read. Storing would overwrite a good baseline with incomplete data.
         const hasAnyUln = snap.routes.some(r => r.isActive && r.uln !== null);
