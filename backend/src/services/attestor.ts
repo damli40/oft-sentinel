@@ -104,8 +104,11 @@ export async function attest(
     : "unknown";
 
   // Post-state: confirm the ID is within the registry's total count.
+  // Brief pause lets the RPC node catch up before reading total() — avoids
+  // a stale-read false positive on Mantle Sepolia's load-balanced endpoints.
   if (attestationId !== "unknown") {
     try {
+      await new Promise(r => setTimeout(r, 800));
       const total = await pub.readContract({ address: registry, abi: REGISTRY_ABI, functionName: "total" });
       if (total <= BigInt(attestationId)) {
         console.warn(`[attestor] post-state mismatch: attestationId=${attestationId} registry total=${total}`);
