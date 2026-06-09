@@ -63,7 +63,11 @@ export async function produceWeakConfigAttestation(
     console.error(`[sentinel] weak-config attest failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
   }
 
-  verdict.alertTxHash = await dispatchAlert(verdict, snapshot.owner ?? null);
+  try {
+    verdict.alertTxHash = await dispatchAlert(verdict, snapshot.owner ?? null);
+  } catch (e: any) {
+    console.error(`[sentinel] weak-config alert failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
+  }
   weakAlertFired.add(watched.address);
 }
 
@@ -112,7 +116,11 @@ export async function produceVerdict(
     console.error(`[sentinel] attest failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
   }
 
-  verdict.alertTxHash = await dispatchAlert(verdict, snapshot.owner);
+  try {
+    verdict.alertTxHash = await dispatchAlert(verdict, snapshot.owner);
+  } catch (e: any) {
+    console.error(`[sentinel] alert failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
+  }
   recordVerdict(verdict);
   return verdict;
 }

@@ -89,10 +89,10 @@ const RISK_RANK: Record<RiskLevel, number> = { PASS: 0, AT_RISK: 1, CRITICAL: 2 
 // Severity → score deduction (mirrors score.ts).
 const SEV_DEDUCTION: Record<Severity, number> = { CRITICAL: 40, HIGH: 20, MEDIUM: 10, LOW: 5, PASS: 0 };
 
-function preflightScore(score: number, riskLevel: RiskLevel, severity: Severity): PreflightResult {
-  const scoreAfter = Math.min(100, score + SEV_DEDUCTION[severity]);
+function preflightScore(rawScore: number, riskLevel: RiskLevel, severity: Severity): PreflightResult {
+  const scoreAfter = Math.min(100, rawScore + SEV_DEDUCTION[severity]);
   const riskAfter: RiskLevel = scoreAfter <= 25 ? "CRITICAL" : scoreAfter <= 84 ? "AT_RISK" : "PASS";
-  return { scoreBefore: score, riskBefore: riskLevel, scoreAfter, riskAfter };
+  return { scoreBefore: rawScore, riskBefore: riskLevel, scoreAfter, riskAfter };
 }
 
 /**
@@ -397,7 +397,7 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     // Multisig-controlled proxy is the recommended configuration — no deduction.
   }
 
-  let score = computeScore(findings);
+  const rawScore = computeScore(findings);
 
   let riskLevel: RiskLevel = "PASS";
   for (const f of findings) {
@@ -405,6 +405,7 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     if (RISK_RANK[level] > RISK_RANK[riskLevel]) riskLevel = level;
   }
 
+  let score = rawScore;
   // Keep the attested score coherent with AuditRegistry's documented risk bands.
   if (riskLevel === "CRITICAL") score = Math.min(score, 25);
   if (riskLevel === "AT_RISK") score = Math.min(score, 84);
@@ -412,10 +413,10 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
   const SEV_ORDER: Record<Severity, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, PASS: 4 };
   const tis = [...tisMap.values()].sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity]);
 
-  // Attach pre-flight simulation to each TIS entry: what would score/risk be
-  // if this single finding were resolved (all other findings unchanged)?
+  // Use rawScore (pre-clamp) so adding back a deduction gives the true improvement
+  // rather than recovering from an artificial band floor.
   for (const intent of tis) {
-    intent.preflight = preflightScore(score, riskLevel, intent.severity);
+    intent.preflight = preflightScore(rawScore, riskLevel, intent.severity);
   }
 
   return { findings, score, riskLevel, tis };

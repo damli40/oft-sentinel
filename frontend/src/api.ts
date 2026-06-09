@@ -4,6 +4,7 @@ export interface MantleOft {
   ticker: string;
   project: string;
   oftName: string;
+  address?: string | null;
   messages: number;
   usdVolume: number;
   messagesFromMantle: number;
@@ -79,6 +80,7 @@ export interface WatchedStatus {
   address: string;
   chainId: number;
   lastSnapshotAt: number | null;
+  corridors?: string[];
   assessment: {
     score: number;
     riskLevel: "PASS" | "AT_RISK" | "CRITICAL";
@@ -169,11 +171,11 @@ export async function runRpcConflictReplay(): Promise<SentinelVerdict> {
   return (await res.json()).verdict;
 }
 
-export async function runLibraryRevertReplay(ticker: string): Promise<SentinelVerdict> {
+export async function runLibraryRevertReplay(): Promise<SentinelVerdict> {
   const res = await fetch(`${BASE}/sentinel/replay-library-revert`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ticker }),
+    body: "{}",
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

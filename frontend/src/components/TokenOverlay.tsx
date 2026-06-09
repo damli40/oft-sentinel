@@ -4,9 +4,6 @@ import type { WatchedStatus, TransactionIntent } from "../api.ts";
 
 const SEPOLIA = "https://sepolia.mantlescan.xyz";
 const MAINNET  = "https://mantlescan.xyz";
-const CORRIDORS = ["ethereum", "hyperliquid", "polygon", "arbitrum", "base", "optimism", "avalanche", "bsc", "sei", "berachain"];
-
-
 type RiskLvl = "crit" | "warn" | "safe" | "scan";
 
 function riskLevel(w: WatchedStatus): RiskLvl {
@@ -228,11 +225,15 @@ export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) 
             {/* Monitored corridors */}
             <div>
               <div className="to-sec-lbl">Monitored corridors</div>
-              <div className="to-corrs">
-                {CORRIDORS.map(c => (
-                  <span key={c} className="to-corr">{c}</span>
-                ))}
-              </div>
+              {watched.corridors?.length ? (
+                <div className="to-corrs">
+                  {watched.corridors.map(c => (
+                    <span key={c} className="to-corr">{c}</span>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--faint)", paddingTop: 4 }}>Scanning routes…</div>
+              )}
             </div>
 
             {/* Contract */}

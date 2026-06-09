@@ -15,20 +15,29 @@ interface State {
   verdicts: SentinelVerdict[]; // newest last
 }
 
+let memState: State | null = null;
+
 function key(oft: string, chainId: number): string {
   return `${chainId}:${oft.toLowerCase()}`;
 }
 
 function load(): State {
-  if (!existsSync(STATE_FILE)) return { snapshots: {}, verdicts: [] };
+  if (memState) return memState;
+  if (!existsSync(STATE_FILE)) {
+    memState = { snapshots: {}, verdicts: [] };
+    return memState;
+  }
   try {
-    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    memState = JSON.parse(readFileSync(STATE_FILE, "utf8")) as State;
+    return memState;
   } catch {
-    return { snapshots: {}, verdicts: [] };
+    memState = { snapshots: {}, verdicts: [] };
+    return memState;
   }
 }
 
 function save(state: State): void {
+  memState = state;
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
@@ -70,23 +79,35 @@ export interface HistoryEntry {
   capturedAt: number;
 }
 
+let histIndex: Map<string, HistoryEntry[]> | null = null;
+
+function loadHistIndex(): Map<string, HistoryEntry[]> {
+  if (histIndex) return histIndex;
+  histIndex = new Map();
+  if (!existsSync(HISTORY_FILE)) return histIndex;
+  for (const line of readFileSync(HISTORY_FILE, "utf8").split("\n").filter(Boolean)) {
+    try {
+      const e = JSON.parse(line) as HistoryEntry;
+      const k = key(e.oft, e.chainId);
+      if (!histIndex.has(k)) histIndex.set(k, []);
+      histIndex.get(k)!.push(e);
+    } catch { /* skip malformed */ }
+  }
+  return histIndex;
+}
+
 export function appendScoreHistory(entry: HistoryEntry): void {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
   appendFileSync(HISTORY_FILE, JSON.stringify(entry) + "\n");
+  const idx = loadHistIndex();
+  const k = key(entry.oft, entry.chainId);
+  if (!idx.has(k)) idx.set(k, []);
+  idx.get(k)!.push(entry);
 }
 
 export function getScoreHistory(oft: string, chainId: number, limit = 100): HistoryEntry[] {
-  if (!existsSync(HISTORY_FILE)) return [];
-  const k = key(oft, chainId);
-  const lines = readFileSync(HISTORY_FILE, "utf8").split("\n").filter(Boolean);
-  const all: HistoryEntry[] = [];
-  for (const line of lines) {
-    try {
-      const e = JSON.parse(line) as HistoryEntry;
-      if (key(e.oft, e.chainId) === k) all.push(e);
-    } catch { /* skip malformed */ }
-  }
-  return all.slice(-limit);
+  const entries = loadHistIndex().get(key(oft, chainId)) ?? [];
+  return entries.slice(-limit);
 }
 
 // ── Feed events ───────────────────────────────────────────────────────────────

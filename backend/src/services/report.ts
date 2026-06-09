@@ -85,16 +85,18 @@ async function writeReport(facts: unknown): Promise<string | null> {
   }
 }
 
-const cache = new Map<string, { at: number; markdown: string }>();
+// Keyed by address only — one entry per OFT. The capturedAt comparison ensures we
+// regenerate when a new snapshot arrives without letting old entries accumulate.
+const cache = new Map<string, { capturedAt: number; markdown: string }>();
 
 /** Generate (or return cached) a full AI-written markdown audit report for one watched OFT. */
 export async function generateReport(w: WatchedOft): Promise<string | null> {
   const snap = getSnapshot(w.address, w.chainId);
   if (!snap) return null; // not polled yet
 
-  const cacheKey = `${w.address.toLowerCase()}:${snap.capturedAt}`;
+  const cacheKey = w.address.toLowerCase();
   const hit = cache.get(cacheKey);
-  if (hit) return hit.markdown;
+  if (hit && hit.capturedAt === snap.capturedAt) return hit.markdown;
 
   const dvnMeta = await loadDvnMeta();
   const srcChainKey = "mantle";
@@ -133,6 +135,6 @@ export async function generateReport(w: WatchedOft): Promise<string | null> {
   const md = await writeReport(facts);
   if (!md) return null;
 
-  cache.set(cacheKey, { at: Date.now(), markdown: md });
+  cache.set(cacheKey, { capturedAt: snap.capturedAt, markdown: md });
   return md;
 }

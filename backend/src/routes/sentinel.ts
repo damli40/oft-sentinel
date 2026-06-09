@@ -9,6 +9,8 @@ import { loadDvnMeta, resolveDvn } from "../services/lz-config.js";
 
 export const router = Router();
 
+const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
+
 // GET /api/sentinel/report/:address — full markdown audit report for one watched OFT.
 router.get("/report/:address", async (req: Request, res: Response) => {
   const addr = String(req.params.address).toLowerCase();
@@ -43,6 +45,7 @@ router.get("/status", async (_req: Request, res: Response) => {
     return {
       ...w,
       lastSnapshotAt: snap?.capturedAt ?? null,
+      corridors: snap?.routes.filter(r => r.isActive).map(r => r.chainName) ?? [],
       assessment: a ? {
         score: a.score,
         riskLevel: a.riskLevel,
@@ -136,7 +139,7 @@ router.post("/replay-rpc-conflict", async (_req: Request, res: Response) => {
 router.get("/history/:address", (req: Request, res: Response) => {
   const addr = String(req.params.address).toLowerCase();
   const limit = Math.min(Number(req.query.limit ?? 200), 500);
-  const history = getScoreHistory(addr, 5000, limit);
+  const history = getScoreHistory(addr, MANTLE_CHAIN_ID, limit);
   res.json({ oft: addr, history });
 });
 

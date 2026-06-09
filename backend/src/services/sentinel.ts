@@ -3,7 +3,7 @@ import { readSnapshot } from "./lz-config.js";
 import { assessSnapshot } from "./drift.js";
 import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
 import { putSnapshot, appendScoreHistory } from "./snapshot-store.js";
-import { getMantleOfts } from "./dune.js";
+import { getSentinelWatchlist } from "./dune.js";
 
 const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
@@ -26,7 +26,7 @@ const WATCHED_TTL = 10 * 60_000;
 export async function getWatched(force = false): Promise<WatchedOft[]> {
   if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL)
     return [...watchedCache.list, KELP_DEMO_OFT];
-  const ofts = await getMantleOfts(force).catch(() => []);
+  const ofts = await getSentinelWatchlist(force).catch(() => []);
   const seen = new Set<string>();
   const list = ofts
     .filter((o) => {
@@ -70,11 +70,15 @@ export async function pollOnce(): Promise<void> {
         // Record score history on every poll cycle.
         const { score, riskLevel, findings, tis } = await assessSnapshot(snap, w.ticker);
         appendScoreHistory({ oft: w.address, chainId: w.chainId, score, riskLevel, capturedAt: snap.capturedAt });
-        // Attest + alert for persistently CRITICAL configs (once per boot, not on every poll).
-        if (riskLevel === "CRITICAL") {
+        // Run drift check first — it attests+alerts when the config changed.
+        // Only fire the weak-config attest path when there was NO drift this cycle:
+        // drift events are already handled by runCheck→produceVerdict, and calling
+        // both paths in the same tick would land two on-chain attestations for the
+        // same config change.
+        const driftVerdict = await runCheck(w, snap);
+        if (!driftVerdict && riskLevel === "CRITICAL") {
           await produceWeakConfigAttestation(w, snap, findings, score, riskLevel, tis);
         }
-        await runCheck(w, snap);
       } catch (e: any) {
         console.error(`[sentinel] poll failed for ${w.ticker}:`, e.shortMessage ?? e.message);
       }

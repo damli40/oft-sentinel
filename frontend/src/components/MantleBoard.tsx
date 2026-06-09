@@ -77,7 +77,7 @@ export function MantleBoard({ ofts, error, status, onPick }: Props) {
                   <div className="tk">{o.ticker}</div>
                   <div className="addr" style={{ marginTop: 2 }}>{o.project}</div>
                 </td>
-                <td className="addr">{shortAddr(o.oftName || o.ticker)}</td>
+                <td className="addr">{o.address ? shortAddr(o.address) : o.oftName || '—'}</td>
                 <td className="vol">{formatUsd(o.usdVolume)}</td>
                 <td style={{ textAlign: "right" }}>
                   <span className={getStatusCls(w)}>

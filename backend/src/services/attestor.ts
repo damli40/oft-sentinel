@@ -82,12 +82,6 @@ export async function attest(
   const pub = createPublicClient({ chain: sentinelChain, transport: http(SENTINEL_RPC) });
   const registry = registryAddress();
 
-  const idBefore = (await pub.readContract({
-    address: registry,
-    abi: REGISTRY_ABI,
-    functionName: "total",
-  })) as bigint;
-
   const txHash = await wallet.writeContract({
     address: registry,
     abi: REGISTRY_ABI,
@@ -95,18 +89,19 @@ export async function attest(
     args: [getAddress(oft), watchedChainId, hash, score, RISK_ENUM[risk], AGENT_ID],
   });
 
-  await pub.waitForTransactionReceipt({ hash: txHash });
+  const receipt = await pub.waitForTransactionReceipt({ hash: txHash });
 
-  // Post-state verification: confirm the registry total incremented exactly once.
-  const totalAfter = (await pub.readContract({
-    address: registry,
-    abi: REGISTRY_ABI,
-    functionName: "total",
-  })) as bigint;
-  if (totalAfter !== idBefore + 1n) {
-    console.warn(`[attestor] post-state mismatch: expected total ${idBefore + 1n}, got ${totalAfter}`);
-  }
+  // Parse attestation ID from the Attested event emitted in the receipt.
+  // Pre-reading total() before the tx races when multiple OFTs attest concurrently:
+  // both callers can read the same total() and one ends up storing the wrong ID.
+  // Attested(uint256 indexed id, address indexed oft, uint32, bytes32, uint8, uint8, uint256 indexed agentId, uint64)
+  const ATTESTED_SIG = keccak256(toHex("Attested(uint256,address,uint32,bytes32,uint8,uint8,uint256,uint64)")) as `0x${string}`;
+  const attestedLog = receipt.logs.find(
+    (l) => l.address.toLowerCase() === registry.toLowerCase() && l.topics[0] === ATTESTED_SIG
+  );
+  const attestationId = attestedLog?.topics[1] != null
+    ? BigInt(attestedLog.topics[1]).toString()
+    : "unknown";
 
-  // attest returns the new id; total() before the call == the id just assigned.
-  return { txHash, attestationId: idBefore.toString() };
+  return { txHash, attestationId };
 }
