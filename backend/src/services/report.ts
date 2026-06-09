@@ -135,6 +135,15 @@ export async function generateReport(w: WatchedOft): Promise<string | null> {
   const md = await writeReport(facts);
   if (!md) return null;
 
-  cache.set(cacheKey, { capturedAt: snap.capturedAt, markdown: md });
-  return md;
+  // Deterministic coverage disclaimer — appended outside the LLM so it is always
+  // present and accurate. Sentinel reads EVM corridors only; an OFT may also bridge
+  // to non-EVM chains (e.g. Solana, Aptos, TON) whose send-side config is readable
+  // on the Mantle endpoint but whose receive-side verification needs non-EVM tooling.
+  const coverage = `\n\n---\n\n*Coverage: Sentinel monitors **EVM corridors**. Non-EVM destinations ` +
+    `(Solana, Aptos, TON, Sui, etc.) are not yet monitored — this report does not cover them. ` +
+    `Full non-EVM corridor verification is on the LSIN roadmap.*\n`;
+  const withCoverage = md + coverage;
+
+  cache.set(cacheKey, { capturedAt: snap.capturedAt, markdown: withCoverage });
+  return withCoverage;
 }

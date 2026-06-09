@@ -29,3 +29,6 @@ npm-debug.log*
 
 # macOS
 .DS_Store
+
+# firecrawl CLI local cache
+.firecrawl/

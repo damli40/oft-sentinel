@@ -1044,6 +1044,12 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
               </div>
             )}
 
+            {/* Coverage scope — honest about what is and isn't monitored */}
+            <div style={{ marginTop: 10, padding: "8px 10px", fontSize: 11, lineHeight: 1.4, opacity: 0.55 }}>
+              Coverage: <strong>EVM corridors</strong>. Non-EVM destinations
+              (Solana, Aptos, TON, Sui&nbsp;…) are not yet monitored.
+            </div>
+
           </div>
         </div>
       </div>
