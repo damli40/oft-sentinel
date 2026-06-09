@@ -164,33 +164,39 @@ export async function dispatchAlert(
     console.error("[alert] on-chain AlertBus failed:", e.shortMessage ?? e.message);
   }
 
-  const txLine = alertTxHash ? `AlertBus tx: ${SEPOLIA_EXPLORER}/tx/${alertTxHash}` : "AlertBus tx: unavailable";
-  const attestationLine = v.attestTxHash ? `Attestation tx: ${SEPOLIA_EXPLORER}/tx/${v.attestTxHash}` : "Attestation tx: unavailable";
+  const txLine = alertTxHash ? `AlertBus: ${SEPOLIA_EXPLORER}/tx/${alertTxHash}` : "AlertBus: unavailable";
+  const attestationLine = v.attestTxHash ? `Attestation: ${SEPOLIA_EXPLORER}/tx/${v.attestTxHash}` : "Attestation: unavailable";
   const reasons = v.reasons.length ? v.reasons.join("; ") : v.verdict;
   const publicMessage = [
-    `OFT Sentinel alert: ${v.riskLevel} drift on ${v.ticker}`,
+    `OFT SENTINEL ALERT`,
+    `${v.riskLevel}: ${v.ticker}`,
+    ``,
     `Score: ${v.score}/100`,
     `Reason: ${reasons}`,
+    ``,
     `OFT: ${MAINNET_EXPLORER}/address/${v.oft}`,
     attestationLine,
     txLine,
   ].join("\n");
   const tisLines = v.tis && v.tis.length > 0
     ? [
-        "Remediation:",
+        ``,
+        `Remediation:`,
         ...v.tis.slice(0, 3).map((t, i) =>
-          `  ${i + 1}. [${t.severity}] ${t.action}${t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}`
+          `${i + 1}. [${t.severity}] ${t.action}${t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}`
         ),
       ]
     : [];
   const teamMessage = [
-    `Action needed: ${v.ticker} OFT drift detected`,
+    `Action needed: ${v.ticker} drift detected`,
+    ``,
     `Risk: ${v.riskLevel}`,
     `Score: ${v.score}/100`,
-    `Verdict: ${v.verdict}`,
-    `Why: ${reasons}`,
-    `OFT: ${v.oft} on chain ${v.chainId}`,
-    `Owner nudge recipient: ${recipient}`,
+    `Reason: ${reasons}`,
+    ``,
+    `OFT: ${v.oft} (chain ${v.chainId})`,
+    `Recipient: ${recipient}`,
+    ``,
     attestationLine,
     txLine,
     ...tisLines,
@@ -209,7 +215,7 @@ export async function dispatchAlert(
   await Promise.all(sends);
 
   if (v.riskLevel === "CRITICAL") {
-    postX(`🚨 ${v.ticker} OFT config drifted into a CRITICAL state (score ${v.score}/100). ${v.reasons[0] ?? ""} — flagged + attested on-chain by OFT Sentinel.`);
+    postX(`🚨 ${v.ticker} OFT config drifted into CRITICAL state (score ${v.score}/100). ${v.reasons[0] ?? ""} Flagged and attested on-chain by OFT Sentinel.`);
   }
 
   return alertTxHash;
