@@ -3,7 +3,7 @@ import { readSnapshot } from "./lz-config.js";
 import { assessSnapshot } from "./drift.js";
 import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
 import { getSnapshot, putSnapshot, appendScoreHistory } from "./snapshot-store.js";
-import { getSentinelWatchlist } from "./dune.js";
+import { getMantleOfts } from "./dune.js";
 
 const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
@@ -17,8 +17,10 @@ const KELP_DEMO_OFT: WatchedOft = {
   chainId: MANTLE_CHAIN_ID,
 };
 
-// Watchlist: all-time OFTs with ≥$1M USD volume from the leaderboard query.
-// Low-volume and test contracts are excluded before they reach the polling loop.
+// Watchlist: all-time OFTs with ≥$1M USD volume from the leaderboard query (7638642).
+// Value-at-risk, not recent activity, decides who we watch — a high-value bridge that
+// has gone quiet is exactly where a config drift goes unnoticed. Low-volume and test
+// contracts are excluded before they reach the polling loop.
 const WATCHLIST_MIN_VOLUME = 1_000_000;
 let watchedCache: { at: number; list: WatchedOft[] } | null = null;
 const WATCHED_TTL = 10 * 60_000;
@@ -26,7 +28,7 @@ const WATCHED_TTL = 10 * 60_000;
 export async function getWatched(force = false): Promise<WatchedOft[]> {
   if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL)
     return [...watchedCache.list, KELP_DEMO_OFT];
-  const ofts = await getSentinelWatchlist(force).catch(() => []);
+  const ofts = await getMantleOfts(force).catch(() => []);
   const seen = new Set<string>();
   const list = ofts
     .filter((o) => {
@@ -67,16 +69,18 @@ export async function pollOnce(): Promise<void> {
     await mapLimit(watched.filter((w) => w.ticker !== "DEMO"), POLL_CONCURRENCY, async (w) => {
       try {
         const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
-        // Skip storing if peer sweep returned 0 active routes but the stored baseline
-        // has active routes — indicates the EID scan failed under RPC load, not a
-        // genuine config change. Storing would wipe a valid baseline with empty data.
+        // Never store or score a snapshot with 0 active routes. Either the peer sweep
+        // failed under RPC load (transient) or the OFT genuinely has no peers — in both
+        // cases storing it would either wipe a good baseline OR, on a first-ever poll,
+        // publish a false "100 / SAFE" verdict for an OFT we never actually read. A
+        // security monitor must never claim an unread config is safe. Skip; a later
+        // cycle with a clean read establishes the real baseline (tile shows pending).
         const hasActiveRoutes = snap.routes.some(r => r.isActive);
         if (!hasActiveRoutes) {
           const existing = getSnapshot(w.address, w.chainId);
-          if (existing?.routes.some(r => r.isActive)) {
-            console.warn(`[sentinel] ${w.ticker}: peer sweep returned 0 active routes — skipping cycle to protect baseline`);
-            return;
-          }
+          const note = existing?.routes.some(r => r.isActive) ? "protecting baseline" : "no false PASS";
+          console.warn(`[sentinel] ${w.ticker}: 0 active routes this cycle — skipping (${note})`);
+          return;
         }
         // Skip storing if every active route returned a null ULN — indicates a failed
         // RPC read. Storing would overwrite a good baseline with incomplete data.
