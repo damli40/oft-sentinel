@@ -43,11 +43,13 @@ function ago(ts: number): string {
   return `${Math.floor(s / 3600)}h ago`;
 }
 
-// Radar blips: hardcoded positions (decorative)
+// Radar blips (decorative): [level, ring radius % of ringset, angle°] — placed
+// ON the orbit rings (radii 44/33/22 = half the 88/66/44% ring diameters) so
+// they stay on the rings at any card size or aspect ratio.
 const BLIPS: [string, number, number][] = [
-  ["crit", 32, 28], ["crit", 68, 40], ["warn", 24, 62],
-  ["warn", 58, 70], ["warn", 76, 24], ["safe", 44, 46],
-  ["safe", 82, 66], ["crit", 50, 18],
+  ["crit", 44, 205], ["crit", 33, 55], ["crit", 22, 290],
+  ["warn", 44, 100], ["warn", 33, 250], ["warn", 22, 150],
+  ["safe", 44, 335], ["safe", 33, 20],
 ];
 
 function blipColor(l: string) {
@@ -64,25 +66,28 @@ function RadarCard() {
           <div key={p} className="ring" style={{ width: `${p}%`, height: `${p}%` }} />
         ))}
         <div className="sweep" />
+        {BLIPS.map(([lvl, r, deg], i) => {
+          const size = lvl === "crit" ? 9 : lvl === "warn" ? 7 : 5;
+          const color = blipColor(lvl);
+          const rad = (deg * Math.PI) / 180;
+          return (
+            <div
+              key={i}
+              className="radar-blip"
+              style={{
+                left: `${50 + r * Math.cos(rad)}%`,
+                top: `${50 + r * Math.sin(rad)}%`,
+                transform: "translate(-50%, -50%)",
+                width: size, height: size,
+                background: color,
+                boxShadow: `0 0 ${lvl === "crit" ? 10 : 5}px ${color}`,
+                animation: `live-pulse ${1.4 + i * 0.2}s infinite`,
+              }}
+            />
+          );
+        })}
         <Aperture size={64} spin />
       </div>
-      {BLIPS.map(([lvl, x, y], i) => {
-        const size = lvl === "crit" ? 9 : lvl === "warn" ? 7 : 5;
-        const color = blipColor(lvl);
-        return (
-          <div
-            key={i}
-            className="radar-blip"
-            style={{
-              left: `${x}%`, top: `${y}%`,
-              width: size, height: size,
-              background: color,
-              boxShadow: `0 0 ${lvl === "crit" ? 10 : 5}px ${color}`,
-              animation: `live-pulse ${1.4 + i * 0.2}s infinite`,
-            }}
-          />
-        );
-      })}
     </div>
   );
 }

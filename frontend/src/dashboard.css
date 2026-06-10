@@ -15,6 +15,10 @@
 /* ----- verdict spotlight ----- */
 .spotlight { display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: start; padding: 24px; }
 .ring-wrap { position: relative; width: 132px; height: 132px; }
+/* the ring SVGs declare width/height 132 — scale them to the wrap so the
+   absolutely-centered scoretxt stays in the ring's true center when media
+   queries shrink .ring-wrap */
+.ring-wrap svg { width: 100%; height: 100%; display: block; }
 .ring-wrap .scoretxt { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .ring-wrap .scoretxt .v { font-family: var(--mono); font-size: 40px; font-weight: 700; line-height: 1; letter-spacing: -0.03em; }
 .ring-wrap .scoretxt .m { font-family: var(--mono); font-size: 9px; letter-spacing: .18em; color: var(--faint); margin-top: 4px; }
@@ -212,7 +216,7 @@
   .dash { grid-template-columns: 1fr; }
   .dash-side { position: static; }
   .hero { grid-template-columns: 1fr; }
-  .hero .radar-card { max-width: 360px; }
+  .hero .radar-card { max-width: none; aspect-ratio: 16/10; max-height: 360px; }
   .to-main { grid-template-columns: 1fr; }
   .to-score-col { border-right: none; border-bottom: 1px solid var(--border-soft); }
   .to-adr { display: none; }

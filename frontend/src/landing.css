@@ -66,9 +66,13 @@
 
 /* hero visual: radar card */
 .radar-card { position: relative; aspect-ratio: 1; border-radius: 20px; background: radial-gradient(120% 120% at 50% 0,rgba(91,231,240,0.07),var(--surface) 60%); box-shadow: var(--elev); overflow: hidden; display: flex; align-items: center; justify-content: center; }
-.radar-card .ringset { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+/* ringset is a centered SQUARE sized to the card's height, so the %-sized
+   rings stay circular (and blips stay on them) even in a rectangular card */
+.radar-card .ringset { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); height: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; }
 .radar-card .ring { position: absolute; border: 1px solid var(--border-soft); border-radius: 50%; }
-.radar-card .sweep { position: absolute; width: 50%; height: 50%; top: 0; left: 50%; transform-origin: 0% 100%; background: conic-gradient(from 0deg, transparent, var(--scan-glow)); animation: scan-rot 4s linear infinite; border-radius: 0 100% 0 0; }
+/* sweep radius = 44% = outermost ring radius — never reaches the card edges,
+   so it reads as a beam instead of getting clipped into a slab */
+.radar-card .sweep { position: absolute; width: 44%; height: 44%; top: 6%; left: 50%; transform-origin: 0% 100%; background: conic-gradient(from 0deg, transparent, var(--scan-glow)); animation: scan-rot 4s linear infinite; border-radius: 0 100% 0 0; }
 .radar-blip { position: absolute; border-radius: 50%; }
 
 /* value props */
@@ -140,7 +144,7 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
   .hero .cta-row .btn { flex: 1; min-width: 140px; justify-content: center; }
   .hero .live-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
   .hero .live-strip .stat .v { font-size: 20px; }
-  .hero .radar-card { width: 100%; max-width: 360px; aspect-ratio: 1; margin: 0 auto; }
+  .hero .radar-card { width: 100%; max-width: none; aspect-ratio: 16/10; margin: 0 auto; }
 
   .props { grid-template-columns: 1fr; gap: 12px; }
 
@@ -193,7 +197,7 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
   .hero .live-strip { gap: 12px 20px; }
   .hero .live-strip .stat .v { font-size: 18px; }
   .hero .live-strip .stat .l { font-size: 10px; }
-  .hero .radar-card { max-width: 280px; }
+  .hero .radar-card { aspect-ratio: 16/10; }
 
   .prop { padding: 18px; }
   .prop h3 { font-size: 15px; }
