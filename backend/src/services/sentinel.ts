@@ -2,7 +2,7 @@ import type { OftSnapshot, RouteSnapshot, WatchedOft, SentinelVerdict } from "..
 import { readSnapshot } from "./lz-config.js";
 import { assessSnapshot } from "./drift.js";
 import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
-import { getSnapshot, putSnapshot, appendScoreHistory } from "./snapshot-store.js";
+import { getSnapshot, putSnapshot, appendScoreHistory, hideVerdictsBefore } from "./snapshot-store.js";
 import { getMantleOfts } from "./dune.js";
 
 const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
@@ -113,9 +113,12 @@ export async function pollOnce(): Promise<void> {
 let timer: NodeJS.Timeout | null = null;
 
 /** Seed (or re-seed) the DEMO OFT's healthy 2-of-2 baseline so the fleet grid
- * shows its standing config before a replay flips it to CRITICAL. */
+ * shows its standing config before a replay flips it to CRITICAL. Prior replay
+ * verdicts are hidden from the tile/overlay; the attestation ledger (and the
+ * on-chain txs it mirrors) stays intact. */
 export function resetDemo(): void {
   putSnapshot(makeSnapshot(KELP_DEMO_OFT.address, KELP_DEMO_OFT.chainId, 2));
+  hideVerdictsBefore(KELP_DEMO_OFT.address, KELP_DEMO_OFT.chainId);
 }
 
 export function startSentinel(intervalMs = 5 * 60_000): void {

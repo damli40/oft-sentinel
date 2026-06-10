@@ -1,5 +1,8 @@
 export type RiskLevel = "PASS" | "AT_RISK" | "CRITICAL";
-export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "PASS";
+// UNKNOWN = the check could not be evaluated (e.g. corridor read failed after
+// retries) — never deducts score, so a transient RPC failure can't masquerade
+// as a security finding.
+export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "PASS" | "UNKNOWN";
 
 export interface Finding {
   severity: Severity;

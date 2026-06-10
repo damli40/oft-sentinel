@@ -13,7 +13,7 @@ const SEL = {
   peers:               "0xbb0b6a53", // (eid) → bytes32
   owner:               "0x8da5cb5b", // () → address
   getThreshold:        "0xe75235b8", // GnosisSafe: () → uint256
-  getEnforcedOptions:  "0x9ca12263", // (uint32,uint16) → bytes
+  enforcedOptions:     "0x5535d461", // OAppOptionsType3 public mapping getter (uint32,uint16) → bytes — getEnforcedOptions 0x9ca12263 is not a real OFT function (reverts on every standard OFT)
 } as const;
 
 // ── Deployments-sourced EID map ───────────────────────────────────────────────
@@ -22,10 +22,16 @@ const SEL = {
 // RPC URLs for destination-side receive reads are curated; absent = skip mismatch check.
 const DEPLOYMENTS_URL = "https://metadata.layerzero-api.com/v1/metadata/deployments";
 
-// Secondary Mantle RPCs used for source-conflict detection. Cross-checking the send-side
-// ULN against an independent provider makes it harder to blind the Sentinel via a
-// compromised or manipulated primary RPC. Both are confirmed public endpoints.
-const MANTLE_FALLBACK_RPCS = ["https://mantle.drpc.org", "https://1rpc.io/mantle"];
+// Secondary Mantle RPCs used for source-conflict detection and read fallback.
+// Cross-checking the send-side ULN against an independent provider makes it
+// harder to blind the Sentinel via a compromised or manipulated primary RPC.
+// All verified live 2026-06-10 (1rpc.io/mantle removed — returns
+// "Requested resource not found" on every call).
+const MANTLE_FALLBACK_RPCS = [
+  "https://mantle.drpc.org",
+  "https://mantle-rpc.publicnode.com",
+  "https://rpc.mantle.xyz",
+];
 
 // Public RPCs for destination-side receive reads. Only needed for mismatch detection;
 // primary signals (counts/confs/libs/owner) are all Mantle-side reads.
@@ -187,6 +193,17 @@ function decodeAddressBool(raw: string): [string | null, boolean | null] {
   return [getAddress("0x" + h.slice(24, 64)), BigInt("0x" + h.slice(64, 128)) !== 0n];
 }
 
+/** Decode an abi.encode(bytes) return and report whether the bytes are non-empty.
+ *  Empty bytes still encode as offset word (0x20) + zero length word — checking
+ *  BigInt(raw) != 0 reads the offset word and always claims "non-empty". */
+function decodeBytesNonEmpty(raw: string): boolean | null {
+  if (!raw || raw === "0x") return null;
+  const h = raw.slice(2);
+  if (h.length < 128) return null; // need offset word + length word
+  const off = uintAt(h, 0);
+  return uintAt(h, off) > 0;
+}
+
 function decodeUlnConfig(raw: string): UlnSnapshot | null {
   if (!raw || raw === "0x") return null;
   const h = raw.slice(2);
@@ -214,6 +231,74 @@ async function rawCall(client: ReturnType<typeof createPublicClient>, to: Addres
   return res.data ?? "0x";
 }
 
+// Etherscan v2 proxy eth_call — final fallback when both Mantle RPCs fail.
+// /oft-review reads the same corridors cleanly through this path while the
+// public RPCs drop calls under load. Only fires after both RPCs failed, so
+// volume stays far below the free-tier rate limit.
+const ETHERSCAN_API = "https://api.etherscan.io/v2/api";
+
+// Free tier allows 3 calls/sec — serialize fallback calls ~400ms apart so a
+// burst of concurrent RPC failures doesn't just trade one failure mode
+// (dropped calls) for another (429s).
+let etherscanQueue: Promise<unknown> = Promise.resolve();
+
+function etherscanCall(chainId: number, to: Address, data: string): Promise<string> {
+  const key = process.env.ETHERSCAN_API_KEY;
+  if (!key) return Promise.reject(new Error("ETHERSCAN_API_KEY unset"));
+  const next = etherscanQueue.then(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+    const url = `${ETHERSCAN_API}?chainid=${chainId}&module=proxy&action=eth_call&to=${to}&data=${data}&tag=latest&apikey=${key}`;
+    const res = await fetch(url);
+    const json = (await res.json()) as { result?: unknown };
+    if (typeof json.result !== "string" || !json.result.startsWith("0x")) {
+      throw new Error(`etherscan eth_call: ${JSON.stringify(json).slice(0, 120)}`);
+    }
+    return json.result;
+  });
+  etherscanQueue = next.catch(() => {});
+  return next;
+}
+
+// ── Etherscan PeerSet corridor discovery ─────────────────────────────────────
+// keccak256("PeerSet(uint32,bytes32)") — emitted by OAppCore.setPeer on every
+// standard V2 OFT. One getLogs call returns every corridor the OFT has ever
+// configured (including quiet ones with no message traffic), replacing the
+// 170-EID peers() brute-force sweep with ~N reads.
+const PEERSET_TOPIC = "0x238399d427b947898edb290f5ff0f9109849b1c3ba196a42e35f00c50a54b98b";
+
+/** Returns eid → peer address for every corridor whose latest PeerSet event has a
+ *  non-zero peer, or null when Etherscan is unavailable. Discovery only — every
+ *  EID is re-confirmed with a direct peers() read, so a wrong or stale log can
+ *  suggest a corridor but never fabricate one. */
+async function discoverPeersViaEtherscan(chainId: number, oft: Address): Promise<Map<number, string> | null> {
+  const key = process.env.ETHERSCAN_API_KEY;
+  if (!key) return null;
+  const next = etherscanQueue.then(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+    const url = `${ETHERSCAN_API}?chainid=${chainId}&module=logs&action=getLogs&address=${oft}&topic0=${PEERSET_TOPIC}&fromBlock=0&toBlock=latest&apikey=${key}`;
+    const res = await fetch(url);
+    const json = (await res.json()) as { result?: unknown };
+    if (!Array.isArray(json.result)) {
+      throw new Error(`etherscan getLogs: ${JSON.stringify(json).slice(0, 120)}`);
+    }
+    // Last write per EID wins — a later setPeer(eid, 0) removes the corridor.
+    const logs = (json.result as { data: string; blockNumber: string; logIndex: string }[])
+      .sort((a, b) =>
+        Number(BigInt(a.blockNumber) - BigInt(b.blockNumber)) ||
+        Number(BigInt(a.logIndex || "0x0") - BigInt(b.logIndex || "0x0")));
+    const latest = new Map<number, string>();
+    for (const log of logs) {
+      const h = log.data.replace(/^0x/, "");
+      if (h.length < 128) continue; // PeerSet data = eid word + peer bytes32 word
+      latest.set(uintAt(h, 0), "0x" + h.slice(64, 128));
+    }
+    for (const [eid, peer] of latest) if (BigInt(peer) === 0n) latest.delete(eid);
+    return latest;
+  });
+  etherscanQueue = next.catch(() => {});
+  return next as Promise<Map<number, string>>;
+}
+
 // ── Snapshot reader ───────────────────────────────────────────────────────────
 
 /**
@@ -228,29 +313,69 @@ async function rawCall(client: ReturnType<typeof createPublicClient>, to: Addres
  */
 export async function readSnapshot(oft: string, chainId: number, rpcUrl: string): Promise<OftSnapshot> {
   const srcClient = createPublicClient({ transport: http(rpcUrl) });
-  // Pick one secondary RPC for cross-checking send-side DVN config (source-conflict detection).
-  const secondaryRpcUrl = MANTLE_FALLBACK_RPCS.find((r) => r !== rpcUrl);
-  const secondaryClient = secondaryRpcUrl ? createPublicClient({ transport: http(secondaryRpcUrl) }) : null;
+  // Fallback Mantle RPCs for read resilience. The first one also serves as the
+  // cross-check source for RPC-conflict detection.
+  const fallbackClients = MANTLE_FALLBACK_RPCS.filter((r) => r !== rpcUrl)
+    .map((r) => createPublicClient({ transport: http(r) }));
+  const secondaryClient = fallbackClients[0] ?? null;
   const oftAddr = getAddress(oft) as Address;
+
+  // Per-corridor reads retry once on the primary RPC, fall back to the
+  // secondary, then to Etherscan's eth_call proxy. A transient RPC failure
+  // must not surface as "unverifiable" — that used to deduct score and pollute
+  // history (USDT0 read 50/AT_RISK while every corridor was a healthy 3-of-3).
+  // An empty "0x" counts as failure: every selector we call returns data, and
+  // some public RPCs return empty instead of erroring when they drop a call.
+  async function strictCall(client: typeof srcClient, to: Address, data: string): Promise<string> {
+    const r = await rawCall(client, to, data);
+    if (!r || r === "0x") throw new Error("empty result");
+    return r;
+  }
+  async function resilientCall(to: Address, data: string): Promise<string> {
+    try {
+      return await strictCall(srcClient, to, data);
+    } catch { /* retry primary once */ }
+    try {
+      return await strictCall(srcClient, to, data);
+    } catch { /* fall through to fallbacks */ }
+    for (const fb of fallbackClients) {
+      try {
+        return await strictCall(fb, to, data);
+      } catch { /* next fallback */ }
+    }
+    return etherscanCall(chainId, to, data);
+  }
+
   const [dvnMeta, eidMap] = await Promise.all([loadDvnMeta(), loadEidMap()]);
 
   // The source chain's chainKey — used for DVN name resolution of send-side configs.
   // Must be "mantle" (the LZ chainKey) not "5000" (the EVM chain ID).
   const srcChainKey = eidMap[MANTLE_EID]?.chainKey ?? "mantle";
 
-  // ── Step 1: sweep ALL known V2 EVM EIDs to find active routes ───────────
+  // ── Step 1: discover active corridors ────────────────────────────────────
+  // Fast path: one Etherscan getLogs call for PeerSet events yields the exact
+  // candidate EID set; each is confirmed with a direct peers() read below.
+  // Falls back to sweeping ALL known V2 EVM EIDs when Etherscan is unset,
+  // errors, or returns nothing — a missed corridor would blind the monitor,
+  // so omission always degrades to the exhaustive path, never to silence.
   // Batched to 25 concurrent calls — prevents Mantle RPC rate-limiting when
   // multiple OFTs are polled in parallel (each sweeping 170+ EIDs simultaneously).
   const activeEids: number[] = [];
   const peerAddresses: Record<number, string> = {};
   const EID_BATCH = 25;
 
-  const allEids = Object.keys(eidMap).map(Number).filter((e) => e !== MANTLE_EID);
+  const discovered = await discoverPeersViaEtherscan(chainId, oftAddr).catch(() => null);
+  const allEids = discovered?.size
+    ? [...discovered.keys()].filter((e) => e !== MANTLE_EID && eidMap[e])
+    : Object.keys(eidMap).map(Number).filter((e) => e !== MANTLE_EID);
+  if (discovered?.size) {
+    console.log(`[lz-config] ${oft}: ${allEids.length} candidate corridors via PeerSet logs (skipping full sweep)`);
+  }
   for (let i = 0; i < allEids.length; i += EID_BATCH) {
     await Promise.all(
       allEids.slice(i, i + EID_BATCH).map(async (eid) => {
         try {
-          const r = await rawCall(srcClient, oftAddr, SEL.peers + padU32(eid));
+          const r = await resilientCall(oftAddr, SEL.peers + padU32(eid));
           if (r && r !== "0x" && BigInt(r) !== 0n) {
             activeEids.push(eid);
             // peers() returns bytes32 — last 20 bytes are the peer OFT address
@@ -285,18 +410,18 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
 
       try {
         route.sendLibrary = decodeAddr(
-          await rawCall(srcClient, ENDPOINT, SEL.getSendLibrary + padAddr(oftAddr) + padU32(eid))
+          await resilientCall(ENDPOINT, SEL.getSendLibrary + padAddr(oftAddr) + padU32(eid))
         );
       } catch { /* null */ }
 
       try {
-        const r = await rawCall(srcClient, ENDPOINT, SEL.isDefaultSendLibrary + padAddr(oftAddr) + padU32(eid));
+        const r = await resilientCall(ENDPOINT, SEL.isDefaultSendLibrary + padAddr(oftAddr) + padU32(eid));
         route.sendLibIsDefault = r && r !== "0x" ? BigInt(r) !== 0n : null;
       } catch { /* null */ }
 
       try {
         const [lib, isDefault] = decodeAddressBool(
-          await rawCall(srcClient, ENDPOINT, SEL.getReceiveLibrary + padAddr(oftAddr) + padU32(eid))
+          await resilientCall(ENDPOINT, SEL.getReceiveLibrary + padAddr(oftAddr) + padU32(eid))
         );
         route.receiveLibrary = lib;
         route.receiveLibIsDefault = isDefault;
@@ -305,7 +430,7 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
       if (route.sendLibrary) {
         try {
           route.uln = decodeUlnConfig(
-            await rawCall(srcClient, ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
+            await resilientCall(ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
           );
         } catch { /* null */ }
       }
@@ -335,8 +460,8 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
       // ── Enforced options ────────────────────────────────────────────────
       try {
         // Check msgType 1 (lzReceive). Non-zero / non-empty bytes = options set.
-        const enf = await rawCall(srcClient, oftAddr, SEL.getEnforcedOptions + padU32(eid) + padU32(1));
-        route.hasEnforcedOptions = enf !== "0x" && enf.length > 2 && BigInt(enf) !== 0n;
+        const enf = await resilientCall(oftAddr, SEL.enforcedOptions + padU32(eid) + padU32(1));
+        route.hasEnforcedOptions = decodeBytesNonEmpty(enf);
       } catch { /* null */ }
 
       // ── Step 3: destination-side receive ULN (for mismatch detection) ────

@@ -6,6 +6,7 @@ const DEDUCTIONS: Record<string, number> = {
   MEDIUM: 10,
   LOW: 5,
   PASS: 0,
+  UNKNOWN: 0,
 };
 
 export function computeScore(findings: Finding[]): number {

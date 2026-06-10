@@ -86,13 +86,26 @@ export async function detectDrift(prev: OftSnapshot, next: OftSnapshot): Promise
 
 const RISK_RANK: Record<RiskLevel, number> = { PASS: 0, AT_RISK: 1, CRITICAL: 2 };
 
-// Severity → score deduction (mirrors score.ts).
-const SEV_DEDUCTION: Record<Severity, number> = { CRITICAL: 40, HIGH: 20, MEDIUM: 10, LOW: 5, PASS: 0 };
+// UNKNOWN behaves like PASS for risk banding: an unevaluated check is not evidence
+// of risk. LOW is advisory — it deducts score but doesn't flip the band (mirrors
+// /oft-review, where LOW notes never change the verdict on their own).
+function deriveRiskLevel(fs: Finding[]): RiskLevel {
+  let risk: RiskLevel = "PASS";
+  for (const f of fs) {
+    const level: RiskLevel =
+      f.severity === "CRITICAL" ? "CRITICAL"
+      : f.severity === "HIGH" || f.severity === "MEDIUM" ? "AT_RISK"
+      : "PASS";
+    if (RISK_RANK[level] > RISK_RANK[risk]) risk = level;
+  }
+  return risk;
+}
 
-function preflightScore(rawScore: number, riskLevel: RiskLevel, severity: Severity): PreflightResult {
-  const scoreAfter = Math.min(100, rawScore + SEV_DEDUCTION[severity]);
-  const riskAfter: RiskLevel = scoreAfter <= 25 ? "CRITICAL" : scoreAfter <= 84 ? "AT_RISK" : "PASS";
-  return { scoreBefore: rawScore, riskBefore: riskLevel, scoreAfter, riskAfter };
+// Apply the AuditRegistry risk-band clamps (CRITICAL ≤25, AT_RISK ≤84).
+function clampScore(raw: number, risk: RiskLevel): number {
+  if (risk === "CRITICAL") return Math.min(raw, 25);
+  if (risk === "AT_RISK") return Math.min(raw, 84);
+  return raw;
 }
 
 /**
@@ -118,8 +131,19 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
   const findings: Finding[] = [];
   // TIS: keyed by "intent|dvnAddress" to collapse identical issues across corridors into one entry.
   const tisMap = new Map<string, TransactionIntent>();
+  // Pre-flight links: which findings each intent resolves, and the successor
+  // finding (if any) the fixed config lands in — e.g. fixing 1-of-1 yields a
+  // 2-of-2 config, which itself scores MEDIUM. Simulating the successor state
+  // is what makes pre-flight deterministic instead of a naive deduction reversal.
+  const tisLinks = new Map<string, { resolves: Finding[]; successors: Finding[] }>();
 
-  function addTIS(key: string, corridor: string | null, entry: Omit<TransactionIntent, "corridors">): void {
+  function addTIS(
+    key: string,
+    corridor: string | null,
+    entry: Omit<TransactionIntent, "corridors">,
+    resolves?: Finding,
+    successor?: Finding,
+  ): void {
     if (!tisMap.has(key)) {
       tisMap.set(key, { ...entry, corridors: corridor ? [corridor] : undefined });
     } else if (corridor) {
@@ -127,11 +151,18 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
       if (!ex.corridors) ex.corridors = [];
       if (!ex.corridors.includes(corridor)) ex.corridors.push(corridor);
     }
+    const link = tisLinks.get(key) ?? { resolves: [], successors: [] };
+    if (resolves) link.resolves.push(resolves);
+    if (successor) link.successors.push(successor);
+    tisLinks.set(key, link);
   }
 
   const dvnMeta = await loadDvnMeta();
   // DVN names are keyed by LZ chainKey string ("mantle"), not numeric chain ID ("5000").
   const srcChainKey = "mantle";
+
+  // Corridors with no enforced options — collapsed into one LOW finding below.
+  const missingEnfOpts: string[] = [];
 
   for (const route of activeRoutes(snap)) {
     // ── RPC source conflict ─────────────────────────────────────────────────
@@ -140,11 +171,12 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     // security downgrade, or there is a genuine data inconsistency — both
     // require manual verification before trusting any automated verdict.
     if (route.rpcConflict) {
-      findings.push({
+      const f: Finding = {
         severity: "CRITICAL",
         check: "RPC Source Conflict",
         detail: `${route.chainName}: multiple RPC providers disagree on the required DVN configuration: possible node manipulation or data inconsistency.`,
-      });
+      };
+      findings.push(f);
       addTIS("resolve_rpc_conflict", route.chainName, {
         intent: "resolve_rpc_conflict",
         action: "Manually verify DVN configuration on-chain before trusting this verdict",
@@ -152,15 +184,18 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "All RPC sources agree on the same DVN configuration",
         reason: "RPC disagreement may indicate node manipulation, stale data, or a mid-block state read",
         severity: "CRITICAL",
-      });
+      }, f);
     }
 
     const uln = route.uln;
     if (!uln) {
+      // UNKNOWN: read failed after retry + secondary-RPC fallback. Surfaced for
+      // transparency but never deducts score — a transient infra failure must
+      // not read as a security downgrade (USDT0 scored 50 from exactly this).
       findings.push({
-        severity: "MEDIUM",
+        severity: "UNKNOWN",
         check: "ULN Unreadable",
-        detail: `${route.chainName}: ${route.sendLibrary ? "ULN config could not be read" : "send library not configured on endpoint"}. DVN and confirmation settings unverifiable on this corridor.`,
+        detail: `${route.chainName}: ${route.sendLibrary ? "ULN config could not be read" : "send library not configured on endpoint"}. DVN and confirmation settings unverifiable on this corridor (not scored).`,
       });
       continue;
     }
@@ -172,11 +207,19 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     const effectiveDvnCount = uln.requiredDVNCount + (uln.optionalDVNThreshold ?? 0);
     const reqNames = uln.requiredDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta)).join(", ");
     if (effectiveDvnCount <= 1) {
-      findings.push({
+      const f: Finding = {
         severity: "CRITICAL",
         check: "DVN Count",
         detail: `${route.chainName}: 1-of-1 effective DVN (${reqNames || "unresolved"}): single point of failure (Kelp rsETH exploit pattern).`,
-      });
+      };
+      findings.push(f);
+      // Successor: adding one DVN lands in the 2-of-2 state, which itself
+      // scores MEDIUM — pre-flight must predict 84/AT_RISK, not 100/PASS.
+      const successor: Finding = {
+        severity: "MEDIUM",
+        check: "DVN Count",
+        detail: `${route.chainName}: 2 effective DVNs after fix: minimal redundancy.`,
+      };
       addTIS("restore_dvn_redundancy", route.chainName, {
         intent: "restore_dvn_redundancy",
         action: "Add a second independent required DVN to the send configuration",
@@ -186,13 +229,14 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "≥2 independent required DVNs per message path",
         reason: "1-of-1 DVN config matches the Kelp rsETH exploit pattern. Single DVN compromise enables message forgery.",
         severity: "CRITICAL",
-      });
+      }, f, successor);
     } else if (effectiveDvnCount === 2) {
-      findings.push({
+      const f: Finding = {
         severity: "MEDIUM",
         check: "DVN Count",
         detail: `${route.chainName}: 2 effective DVNs (${reqNames}): minimal redundancy.`,
-      });
+      };
+      findings.push(f);
       addTIS("increase_dvn_redundancy", route.chainName, {
         intent: "increase_dvn_redundancy",
         action: "Add a third independent required DVN to strengthen verification",
@@ -200,7 +244,7 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "≥3 independent required DVNs per message path",
         reason: "2-of-2 DVN config means a single DVN compromise or liveness failure halts all messages",
         severity: "MEDIUM",
-      });
+      }, f);
     }
 
     // ── Deprecated DVNs ─────────────────────────────────────────────────────
@@ -208,11 +252,12 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     for (const dvnAddr of uln.requiredDVNs) {
       if (isDvnDeprecated(dvnAddr, srcChainKey, dvnMeta)) {
         const name = resolveDvn(dvnAddr, srcChainKey, dvnMeta);
-        findings.push({
+        const f: Finding = {
           severity: "CRITICAL",
           check: "Deprecated DVN",
           detail: `${route.chainName}: required DVN "${name}" is deprecated: messages may halt.`,
-        });
+        };
+        findings.push(f);
         addTIS(`replace_deprecated_dvn|${dvnAddr.toLowerCase()}`, route.chainName, {
           intent: "replace_deprecated_dvn",
           action: `Replace deprecated DVN "${name}" with an active supported alternative`,
@@ -222,7 +267,7 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
           targetState: "Active, supported DVN in required set",
           reason: "Deprecated DVNs stop attesting messages, permanently blocking the route",
           severity: "CRITICAL",
-        });
+        }, f);
       }
     }
 
@@ -265,11 +310,12 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         const sendSet = new Set(sendNames);
         const recvSet = new Set(recvNames);
         if (sendSet.size !== recvSet.size || [...sendSet].some((n) => !recvSet.has(n))) {
-          findings.push({
+          const f: Finding = {
             severity: "HIGH",
             check: "DVN Mismatch",
             detail: `${route.chainName}: send DVNs [${sendNames.join(", ")}] != receive DVNs [${recvNames.join(", ")}]. Messages will be permanently blocked.`,
-          });
+          };
+          findings.push(f);
           addTIS(`resolve_dvn_mismatch`, route.chainName, {
             intent: "resolve_dvn_mismatch",
             action: "Align send and receive DVN sets so both sides verify the same providers",
@@ -277,18 +323,19 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
             targetState: "Matching DVN sets on send and receive sides",
             reason: "DVN mismatch means no message can be verified: permanent route block",
             severity: "HIGH",
-          });
+          }, f);
         }
       }
     }
 
     // ── Block confirmations ──────────────────────────────────────────────────
     if (uln.confirmations > 0 && uln.confirmations < 15) {
-      findings.push({
+      const f: Finding = {
         severity: "MEDIUM",
         check: "Confirmations",
         detail: `${route.chainName}: ${uln.confirmations} block confirmations (< 15, reorg risk).`,
-      });
+      };
+      findings.push(f);
       addTIS("increase_confirmations", route.chainName, {
         intent: "increase_confirmations",
         action: "Raise confirmation threshold to ≥15 blocks",
@@ -296,27 +343,27 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "≥15 block confirmations",
         reason: "Low confirmations expose the route to chain re-org attacks",
         severity: "MEDIUM",
-      });
+      }, f);
     }
 
     // ── Enforced options ────────────────────────────────────────────────────
+    // Collected per route, emitted as ONE fleet-wide LOW finding after the loop —
+    // a per-corridor deduction would let a low-severity advisory (−5 × N routes)
+    // outweigh a CRITICAL on wide deployments.
     if (route.hasEnforcedOptions === false) {
-      findings.push({
-        severity: "LOW",
-        check: "Enforced Options",
-        detail: `${route.chainName}: no enforced options set: zero-gas messages can permanently stuck nonces.`,
-      });
+      missingEnfOpts.push(route.chainName);
     }
 
     // ── Send library pinning ─────────────────────────────────────────────────
     // Reference says HIGH: LZ Labs OneSig (3-of-5 EOAs) can redirect outbound
     // verification to a different library without the OFT team's involvement.
     if (route.sendLibIsDefault === true) {
-      findings.push({
+      const f: Finding = {
         severity: "HIGH",
         check: "Send Library Pinning",
         detail: `${route.chainName}: send library is the upgradeable default. LZ Labs OneSig can redirect outbound verification unilaterally.`,
-      });
+      };
+      findings.push(f);
       addTIS("pin_send_library", route.chainName, {
         intent: "pin_send_library",
         action: "Pin the send library to a specific version",
@@ -324,7 +371,7 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "Pinned library address immutable to LZ Labs upgrades",
         reason: "Unpinned send library lets LZ Labs OneSig redirect outbound message verification",
         severity: "HIGH",
-      });
+      }, f);
     }
 
     // ── Receive library pinning ──────────────────────────────────────────────
@@ -332,11 +379,12 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
     // the OFT team. A library upgrade can accept forged messages regardless of
     // DVN config — this trust vector sits below DVN verification in the stack.
     if (route.receiveLibIsDefault === true) {
-      findings.push({
+      const f: Finding = {
         severity: "CRITICAL",
         check: "Receive Library",
         detail: `${route.chainName}: receive library is the upgradeable default. LZ Labs can change inbound message acceptance rules unilaterally, bypassing DVN config.`,
-      });
+      };
+      findings.push(f);
       addTIS("pin_receive_library", route.chainName, {
         intent: "pin_receive_library",
         action: "Pin the receive library to a specific version",
@@ -344,18 +392,19 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "Pinned library address immutable to LZ Labs upgrades",
         reason: "Unpinned receive library lets LZ Labs change inbound acceptance rules, bypassing DVN config entirely",
         severity: "CRITICAL",
-      });
+      }, f);
     }
 
     // ── Confirmation mismatch (send vs receive) ──────────────────────────────
     // If the destination chain requires more confirmations than the source sends,
     // the threshold is never met → permanent message block on that corridor.
     if (route.uln && route.receiveUln && route.receiveUln.confirmations > route.uln.confirmations) {
-      findings.push({
+      const f: Finding = {
         severity: "HIGH",
         check: "Confirmation Mismatch",
         detail: `${route.chainName}: send confirmations (${route.uln.confirmations}) < receive required (${route.receiveUln.confirmations}). Messages will be permanently blocked.`,
-      });
+      };
+      findings.push(f);
       addTIS(`resolve_confirmation_mismatch`, route.chainName, {
         intent: "resolve_confirmation_mismatch",
         action: `Raise send confirmations to match the destination's required ${route.receiveUln.confirmations}`,
@@ -363,17 +412,37 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: `Send confirmations ≥ ${route.receiveUln.confirmations}`,
         reason: "Send confirmations below receive threshold permanently blocks message delivery",
         severity: "HIGH",
-      });
+      }, f);
     }
+  }
+
+  // ── Enforced options (fleet-wide) ────────────────────────────────────────
+  if (missingEnfOpts.length > 0) {
+    const f: Finding = {
+      severity: "LOW",
+      check: "Enforced Options",
+      detail: `No enforced options set on ${missingEnfOpts.length} corridor${missingEnfOpts.length > 1 ? "s" : ""} (${missingEnfOpts.join(", ")}): zero-gas messages can permanently stick channel nonces.`,
+    };
+    findings.push(f);
+    addTIS("set_enforced_options", null, {
+      intent: "set_enforced_options",
+      action: "Call setEnforcedOptions() with an lzReceive gas floor (≥65k) for each destination EID",
+      currentState: `No enforced options on ${missingEnfOpts.length} corridor${missingEnfOpts.length > 1 ? "s" : ""}`,
+      targetState: "Enforced lzReceive gas floor on every active corridor",
+      reason: "Without enforced options, zero-gas messages can permanently stick channel nonces",
+      severity: "LOW",
+    }, f);
+    tisMap.get("set_enforced_options")!.corridors = [...missingEnfOpts];
   }
 
   // ── Owner type ───────────────────────────────────────────────────────────
   if (snap.ownerIsContract === false) {
-    findings.push({
+    const f: Finding = {
       severity: "HIGH",
       check: "Owner Type",
       detail: "OFT owner is an EOA: config can be changed by a single private key.",
-    });
+    };
+    findings.push(f);
     addTIS("transfer_ownership_to_multisig", null, {
       intent: "transfer_ownership_to_multisig",
       action: "Transfer OFT ownership to a multisig (e.g. Gnosis Safe)",
@@ -381,17 +450,18 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
       targetState: "Multisig owner: M-of-N signers required for config changes",
       reason: "EOA ownership means a single key compromise can alter DVN config, message libraries, or peer addresses",
       severity: "HIGH",
-    });
+    }, f);
   }
 
   // ── Proxy upgrade path ───────────────────────────────────────────────────
   if (snap.proxyAdmin !== null) {
     if (snap.proxyAdminIsMultisig === false) {
-      findings.push({
+      const f: Finding = {
         severity: "HIGH",
         check: "Proxy Upgrade Control",
         detail: `Proxy admin owner is an EOA (${snap.proxyAdminOwner?.slice(0, 10)}...): a single key can upgrade the implementation.`,
-      });
+      };
+      findings.push(f);
       addTIS("transfer_proxy_admin_to_multisig", null, {
         intent: "transfer_proxy_admin_to_multisig",
         action: "Transfer proxy admin control to a multisig",
@@ -399,31 +469,45 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
         targetState: "Multisig-controlled proxy upgrade path",
         reason: "EOA proxy admin means a single key can upgrade the OFT implementation",
         severity: "HIGH",
-      });
+      }, f);
     }
     // Multisig-controlled proxy is the recommended configuration — no deduction.
   }
 
-  const rawScore = computeScore(findings);
-
-  let riskLevel: RiskLevel = "PASS";
-  for (const f of findings) {
-    const level: RiskLevel = f.severity === "CRITICAL" ? "CRITICAL" : f.severity === "PASS" ? "PASS" : "AT_RISK";
-    if (RISK_RANK[level] > RISK_RANK[riskLevel]) riskLevel = level;
+  // If every active corridor was unreadable, the posture is unverified — surface
+  // one MEDIUM so the OFT reads AT_RISK rather than a false 100/PASS.
+  const active = activeRoutes(snap);
+  if (active.length > 0 && active.every((r) => !r.uln)) {
+    findings.push({
+      severity: "MEDIUM",
+      check: "Coverage",
+      detail: "All corridors unreadable after retries: security posture cannot be verified.",
+    });
   }
 
-  let score = rawScore;
+  const riskLevel = deriveRiskLevel(findings);
   // Keep the attested score coherent with AuditRegistry's documented risk bands.
-  if (riskLevel === "CRITICAL") score = Math.min(score, 25);
-  if (riskLevel === "AT_RISK") score = Math.min(score, 84);
+  const score = clampScore(computeScore(findings), riskLevel);
 
-  const SEV_ORDER: Record<Severity, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, PASS: 4 };
+  const SEV_ORDER: Record<Severity, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, PASS: 4, UNKNOWN: 5 };
   const tis = [...tisMap.values()].sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity]);
 
-  // Use rawScore (pre-clamp) so adding back a deduction gives the true improvement
-  // rather than recovering from an artificial band floor.
-  for (const intent of tis) {
-    intent.preflight = preflightScore(rawScore, riskLevel, intent.severity);
+  // Pre-flight: simulate the post-fix findings set (resolved findings removed,
+  // successor findings added) and re-run the exact same deterministic scoring +
+  // clamps. Fixing a 1-of-1 thus correctly predicts the 2-of-2 successor state
+  // (84/AT_RISK), not a naive deduction reversal (100/PASS).
+  for (const [key, intent] of tisMap) {
+    const link = tisLinks.get(key);
+    const resolved = new Set(link?.resolves ?? []);
+    const simulated = findings.filter((f) => !resolved.has(f)).concat(link?.successors ?? []);
+    const riskAfter = deriveRiskLevel(simulated);
+    const preflight: PreflightResult = {
+      scoreBefore: score,
+      riskBefore: riskLevel,
+      scoreAfter: clampScore(computeScore(simulated), riskAfter),
+      riskAfter,
+    };
+    intent.preflight = preflight;
   }
 
   return { findings, score, riskLevel, tis };

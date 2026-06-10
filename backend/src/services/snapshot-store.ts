@@ -13,6 +13,10 @@ const HISTORY_FILE = join(DATA_DIR, "score-history.jsonl");
 interface State {
   snapshots: Record<string, OftSnapshot>; // key → last-known-good snapshot
   verdicts: SentinelVerdict[]; // newest last
+  // key → timestamp: verdicts captured at/before this moment are hidden from
+  // latestVerdict() (tile/overlay) but stay in the ledger — the on-chain
+  // attestations are immutable. Set by "Reset demo".
+  verdictsClearedAt?: Record<string, number>;
 }
 
 let memState: State | null = null;
@@ -64,8 +68,19 @@ export function getVerdicts(): SentinelVerdict[] {
 
 export function latestVerdict(oft: string, chainId: number): SentinelVerdict | null {
   const k = key(oft, chainId);
-  const matching = load().verdicts.filter((v) => key(v.oft, v.chainId) === k);
+  const state = load();
+  const clearedAt = state.verdictsClearedAt?.[k] ?? 0;
+  const matching = state.verdicts.filter((v) => key(v.oft, v.chainId) === k && v.capturedAt > clearedAt);
   return matching.length ? matching[matching.length - 1] : null;
+}
+
+/** Hide an OFT's existing verdicts from latestVerdict() without touching the
+ * ledger. Used by "Reset demo" so the tile/overlay return to the standing
+ * assessment while the attestation history (and on-chain txs) stay intact. */
+export function hideVerdictsBefore(oft: string, chainId: number, ts = Date.now()): void {
+  const state = load();
+  state.verdictsClearedAt = { ...state.verdictsClearedAt, [key(oft, chainId)]: ts };
+  save(state);
 }
 
 // ── Score history ─────────────────────────────────────────────────────────────
