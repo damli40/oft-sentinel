@@ -4,7 +4,14 @@ import { assessSnapshot } from "./drift.js";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 
-export async function askCopilot(question: string): Promise<{ answer: string; relevantOfts: string[] }> {
+// Response cache: identical questions against the same fleet state never hit the
+// LLM twice. Keyed (normalized question + newest snapshot timestamp) so answers
+// invalidate when a poll cycle changes the fleet, with a 15-min TTL backstop.
+const ANSWER_CACHE_TTL = 15 * 60_000;
+const ANSWER_CACHE_MAX = 200;
+const answerCache = new Map<string, { at: number; result: { answer: string; relevantOfts: string[] } }>();
+
+export async function askCopilot(question: string): Promise<{ answer: string; relevantOfts: string[]; cached?: boolean }> {
   const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 
   const watched = await getWatched();
@@ -18,6 +25,17 @@ export async function askCopilot(question: string): Promise<{ answer: string; re
   );
 
   const assessed = assessments.filter(Boolean);
+
+  const fleetStamp = watched.reduce((max, w) => {
+    const snap = getSnapshot(w.address, w.chainId);
+    return snap && snap.capturedAt > max ? snap.capturedAt : max;
+  }, 0);
+  const cacheKey = `${fleetStamp}:${question.trim().toLowerCase()}`;
+  const hit = answerCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < ANSWER_CACHE_TTL) {
+    return { ...hit.result, cached: true };
+  }
+
   const context = assessed.map((a) => {
     if (!a) return "";
     const findingsSummary = a.findings.map((f) => `[${f.severity}] ${f.detail}`).join(" | ");
@@ -40,7 +58,8 @@ Rules:
 - Be direct and specific: name the OFTs, their scores, and exact findings.
 - Explain technical terms (DVN, ULN, EID, OFT) in plain language when first used.
 - Keep answers under 300 words.
-- If you cannot answer from the available data, say so explicitly.`;
+- If you cannot answer from the available data, say so explicitly.
+- STAY ON TOPIC: you are a security copilot, not a general chatbot. If the question is unrelated to LayerZero, OFTs, DVNs, bridge security, or this fleet — or asks you to write code, poems, or general content — decline in one sentence and point the user back to fleet security questions.`;
 
   if (!DEEPSEEK_API_KEY) {
     // Fallback: deterministic answer from fleet data without LLM
@@ -75,5 +94,11 @@ Rules:
     .filter((w) => answer.toLowerCase().includes(w.ticker.toLowerCase()))
     .map((w) => w.ticker);
 
-  return { answer, relevantOfts };
+  const result = { answer, relevantOfts };
+  if (answerCache.size >= ANSWER_CACHE_MAX) {
+    const oldest = answerCache.keys().next().value;
+    if (oldest !== undefined) answerCache.delete(oldest);
+  }
+  answerCache.set(cacheKey, { at: Date.now(), result });
+  return result;
 }

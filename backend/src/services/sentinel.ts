@@ -112,8 +112,17 @@ export async function pollOnce(): Promise<void> {
 
 let timer: NodeJS.Timeout | null = null;
 
+/** Seed (or re-seed) the DEMO OFT's healthy 2-of-2 baseline so the fleet grid
+ * shows its standing config before a replay flips it to CRITICAL. */
+export function resetDemo(): void {
+  putSnapshot(makeSnapshot(KELP_DEMO_OFT.address, KELP_DEMO_OFT.chainId, 2));
+}
+
 export function startSentinel(intervalMs = 5 * 60_000): void {
   console.log(`[sentinel] starting fleet poll on Mantle (${MANTLE_CHAIN_ID}), every ${intervalMs / 1000}s`);
+  // DEMO shows its healthy baseline from boot — but never clobber a replayed
+  // state on restart; the dashboard's "Reset demo" button does that explicitly.
+  if (!getSnapshot(KELP_DEMO_OFT.address, KELP_DEMO_OFT.chainId)) resetDemo();
   pollOnce().catch(console.error);
   timer = setInterval(() => pollOnce().catch(console.error), intervalMs);
 }

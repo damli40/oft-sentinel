@@ -8,6 +8,9 @@ import { startSentinel } from "./services/sentinel.js";
 const app = express();
 const PORT = Number(process.env.PORT ?? 3001);
 
+// Behind Railway's proxy, req.ip must reflect the client (rate limiting), not the LB.
+app.set("trust proxy", 1);
+
 const corsOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",").map((s) => s.trim())
   : ["http://localhost:5173", "http://localhost:4173"];

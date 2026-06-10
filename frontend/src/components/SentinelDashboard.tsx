@@ -8,9 +8,11 @@ import {
   pollSentinel,
   getReport,
   getFeed,
+  getAllHistories,
+  resetDemo,
   askSecurityCopilot,
 } from "../api.ts";
-import type { SentinelStatus, SentinelVerdict, WatchedStatus, FeedEvent, TransactionIntent, PolicyDecisionRecord } from "../api.ts";
+import type { SentinelStatus, SentinelVerdict, WatchedStatus, FeedEvent, TransactionIntent, PolicyDecisionRecord, HistoryEntry } from "../api.ts";
 import { Aperture } from "./Aperture.tsx";
 import { TokenOverlay } from "./TokenOverlay.tsx";
 import "../dashboard.css";
@@ -281,6 +283,7 @@ function SecurityCopilot({ onClose }: CopilotProps) {
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [quota, setQuota] = useState<{ remaining: number; limit: number } | null>(null);
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -304,10 +307,15 @@ function SecurityCopilot({ onClose }: CopilotProps) {
     setInput("");
     setBusy(true);
     try {
-      const { answer } = await askSecurityCopilot(question);
+      const { answer, remaining, limit } = await askSecurityCopilot(question);
+      if (remaining !== undefined && limit !== undefined) setQuota({ remaining, limit });
       setMessages(m => [...m, { role: "assistant", text: answer }]);
-    } catch {
-      setMessages(m => [...m, { role: "assistant", text: "Unable to reach the AI backend. Make sure the server is running." }]);
+    } catch (e: any) {
+      // Surface the server's message (rate limit, input cap) rather than a generic failure.
+      const text = e?.message && e.message !== "Copilot request failed"
+        ? e.message
+        : "Unable to reach the AI backend. Make sure the server is running.";
+      setMessages(m => [...m, { role: "assistant", text }]);
     } finally {
       setBusy(false);
     }
@@ -321,7 +329,9 @@ function SecurityCopilot({ onClose }: CopilotProps) {
           <span className="copilot-mark">◎</span>
           <div>
             <div className="copilot-title">Security Copilot</div>
-            <div className="copilot-sub">Powered by DeepSeek · OFT Sentinel</div>
+            <div className="copilot-sub">
+              Powered by DeepSeek · {quota ? `Community tier — ${quota.remaining}/${quota.limit} queries left` : "Community tier — 10 queries/hour"}
+            </div>
           </div>
           <button
             style={{ marginLeft: "auto", cursor: "pointer", color: "var(--faint)", background: "none", border: "none", fontSize: 18 }}
@@ -374,6 +384,30 @@ function SecurityCopilot({ onClose }: CopilotProps) {
       </div>
     </div>,
     document.body
+  );
+}
+
+// ── Score sparkline ───────────────────────────────────────────────────────────
+// Tiny score-over-time line per fleet tile — the visible record that the agent
+// has been watching continuously, not just assessing once.
+
+function Sparkline({ history, color }: { history: HistoryEntry[]; color: string }) {
+  const pts = history.slice(-30);
+  if (pts.length < 2) return null;
+  const min = Math.min(...pts.map(p => p.score));
+  const max = Math.max(...pts.map(p => p.score));
+  const span = Math.max(max - min, 4); // flat lines still render mid-band
+  const coords = pts
+    .map((p, i) => {
+      const x = (i / (pts.length - 1)) * 100;
+      const y = 20 - ((p.score - min) / span) * 16 - 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg width="100%" height="20" viewBox="0 0 100 20" preserveAspectRatio="none" style={{ display: "block", marginTop: 6, opacity: 0.8 }}>
+      <polyline points={coords} fill="none" stroke={color} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 }
 
@@ -678,8 +712,9 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
   const [status, setStatus]   = useState<SentinelStatus | null>(null);
   const [verdicts, setVerdicts] = useState<SentinelVerdict[]>([]);
   const [feedEvents, setFeedEvents] = useState<FeedEvent[]>([]);
+  const [histories, setHistories] = useState<Record<string, HistoryEntry[]>>({});
   const [error, setError]     = useState("");
-  const [busy, setBusy]       = useState<null | "replay" | "rpc-conflict" | "poll">(null);
+  const [busy, setBusy]       = useState<null | "replay" | "rpc-conflict" | "poll" | "reset">(null);
   const [filter, setFilter]   = useState<"all" | "crit" | "warn" | "safe">("all");
   const [reportTarget, setReportTarget]   = useState<WatchedStatus | null>(null);
   const [overlayTarget, setOverlayTarget] = useState<WatchedStatus | null>(null);
@@ -717,9 +752,10 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
   }
 
   async function refresh() {
-    const [s, v] = await Promise.all([getSentinelStatus(), getSentinelVerdicts()]);
+    const [s, v, h] = await Promise.all([getSentinelStatus(), getSentinelVerdicts(), getAllHistories()]);
     setStatus(s);
     setVerdicts([...v].reverse());
+    setHistories(h);
     await refreshFeed();
     return s;
   }
@@ -784,6 +820,20 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
     setBusy("poll");
     try {
       await pollSentinel();
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleResetDemo() {
+    setError("");
+    setBusy("reset");
+    try {
+      await resetDemo();
+      addLog(mkLine("ok", "✓", "DEMO reset to healthy 2-of-2 baseline"));
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -906,6 +956,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                               {spillLabel(lvl)}
                             </span>
                           </div>
+                          <Sparkline history={histories[w.address.toLowerCase()] ?? []} color={riskColor(lvl)} />
                         </div>
                       );
                     })}
@@ -968,6 +1019,14 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
                   disabled={busy !== null}
                 >
                   {busy === "poll" ? "↻ Polling…" : "↻ Poll now"}
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  onClick={handleResetDemo}
+                  disabled={busy !== null}
+                  title="Re-seed the DEMO OFT's healthy 2-of-2 baseline so the next replay shows the full before → after"
+                >
+                  {busy === "reset" ? "○ Resetting…" : "○ Reset demo"}
                 </button>
                 <button
                   className="btn btn-ghost copilot-btn"
@@ -1063,6 +1122,7 @@ export function SentinelDashboard({ runKelpOnMount, onKelpConsumed }: Props) {
       {overlayTarget && (
         <TokenOverlay
           watched={overlayTarget}
+          history={histories[overlayTarget.address.toLowerCase()] ?? []}
           onClose={() => setOverlayTarget(null)}
           onReport={() => setReportTarget(overlayTarget)}
         />

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { getWatched, pollOnce, runKelpReplay, runLibraryRevertReplay, runRpcConflictReplay } from "../services/sentinel.js";
+import { getWatched, pollOnce, runKelpReplay, runLibraryRevertReplay, runRpcConflictReplay, resetDemo } from "../services/sentinel.js";
 import { getVerdicts, getSnapshot, latestVerdict, getScoreHistory, getFeedEvents } from "../services/snapshot-store.js";
 import { assessSnapshot } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
@@ -10,6 +10,27 @@ import { loadDvnMeta, resolveDvn } from "../services/lz-config.js";
 export const router = Router();
 
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
+
+// ── Copilot rate limiting ─────────────────────────────────────────────────────
+// IP-based sliding window: 10 questions per hour per IP. Protects the DeepSeek
+// budget if the demo gets shared publicly; cached answers still consume a slot
+// (the limit is on requests, the cache is on LLM spend).
+const ASK_LIMIT = 10;
+const ASK_WINDOW_MS = 60 * 60_000;
+const ASK_MAX_QUESTION_CHARS = 500;
+const askHits = new Map<string, number[]>();
+
+function askRateCheck(ip: string): { ok: boolean; remaining: number; retryAfterSec: number } {
+  const now = Date.now();
+  const hits = (askHits.get(ip) ?? []).filter((t) => now - t < ASK_WINDOW_MS);
+  if (hits.length >= ASK_LIMIT) {
+    askHits.set(ip, hits);
+    return { ok: false, remaining: 0, retryAfterSec: Math.ceil((hits[0] + ASK_WINDOW_MS - now) / 1000) };
+  }
+  hits.push(now);
+  askHits.set(ip, hits);
+  return { ok: true, remaining: ASK_LIMIT - hits.length, retryAfterSec: 0 };
+}
 
 // GET /api/sentinel/report/:address — full markdown audit report for one watched OFT.
 router.get("/report/:address", async (req: Request, res: Response) => {
@@ -94,15 +115,17 @@ router.get("/status", async (_req: Request, res: Response) => {
   }));
 
   // Mantle Security Index: unweighted average of all assessed scores (0–100).
-  const assessed = watched.filter((w) => w.assessment !== null);
+  // DEMO is synthetic (replay-only) — it must never move the fleet index.
+  const real = watched.filter((w) => w.ticker !== "DEMO");
+  const assessed = real.filter((w) => w.assessment !== null);
   const msi = assessed.length > 0
     ? Math.round(assessed.reduce((s, w) => s + w.assessment!.score, 0) / assessed.length)
     : null;
   const msiBreakdown = {
-    critical: watched.filter((w) => w.assessment?.riskLevel === "CRITICAL").length,
-    atRisk: watched.filter((w) => w.assessment?.riskLevel === "AT_RISK").length,
-    safe: watched.filter((w) => w.assessment?.riskLevel === "PASS").length,
-    unassessed: watched.length - assessed.length,
+    critical: real.filter((w) => w.assessment?.riskLevel === "CRITICAL").length,
+    atRisk: real.filter((w) => w.assessment?.riskLevel === "AT_RISK").length,
+    safe: real.filter((w) => w.assessment?.riskLevel === "PASS").length,
+    unassessed: real.length - assessed.length,
   };
 
   res.json({
@@ -177,16 +200,47 @@ router.get("/feed", (_req: Request, res: Response) => {
 });
 
 // POST /api/sentinel/ask — Security Copilot: natural language queries over fleet data.
+// Rate-limited (10/hour/IP), input-capped (500 chars); answers cached in ask.ts.
 router.post("/ask", async (req: Request, res: Response) => {
   const question = req.body?.question as string;
   if (!question?.trim()) {
     res.status(400).json({ error: "question is required" });
     return;
   }
+  if (question.length > ASK_MAX_QUESTION_CHARS) {
+    res.status(400).json({ error: `Question too long (max ${ASK_MAX_QUESTION_CHARS} characters)` });
+    return;
+  }
+  const rate = askRateCheck(req.ip ?? "unknown");
+  if (!rate.ok) {
+    res.setHeader("Retry-After", String(rate.retryAfterSec));
+    res.status(429).json({
+      error: `Community tier limit reached (${ASK_LIMIT} questions/hour). Try again in ${Math.max(1, Math.ceil(rate.retryAfterSec / 60))} min.`,
+      retryAfterSec: rate.retryAfterSec,
+    });
+    return;
+  }
   try {
     const result = await askCopilot(question);
-    res.json(result);
+    res.json({ ...result, remaining: rate.remaining, limit: ASK_LIMIT });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/sentinel/reset-demo — re-seed the DEMO OFT's healthy 2-of-2 baseline
+// so the before→after of the next replay is visible in the fleet grid.
+router.post("/reset-demo", (_req: Request, res: Response) => {
+  resetDemo();
+  res.json({ ok: true });
+});
+
+// GET /api/sentinel/history — score history for every watched OFT in one call
+// (fleet-grid sparklines). Keyed by lowercase address.
+router.get("/history", async (_req: Request, res: Response) => {
+  const watched = await getWatched();
+  const histories = Object.fromEntries(
+    watched.map((w) => [w.address.toLowerCase(), getScoreHistory(w.address, MANTLE_CHAIN_ID, 60)])
+  );
+  res.json({ histories });
 });

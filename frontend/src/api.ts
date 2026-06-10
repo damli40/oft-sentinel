@@ -190,13 +190,35 @@ export async function getOftHistory(address: string): Promise<HistoryEntry[]> {
   return (await res.json()).history ?? [];
 }
 
+/** Score history for every watched OFT in one call — keyed by lowercase address. */
+export async function getAllHistories(): Promise<Record<string, HistoryEntry[]>> {
+  const res = await fetch(`${BASE}/sentinel/history`);
+  if (!res.ok) return {};
+  return (await res.json()).histories ?? {};
+}
+
+export async function resetDemo(): Promise<void> {
+  const res = await fetch(`${BASE}/sentinel/reset-demo`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).error ?? "Demo reset failed");
+  }
+}
+
 export async function getFeed(): Promise<FeedEvent[]> {
   const res = await fetch(`${BASE}/sentinel/feed`);
   if (!res.ok) return [];
   return (await res.json()).events ?? [];
 }
 
-export async function askSecurityCopilot(question: string): Promise<{ answer: string; relevantOfts: string[] }> {
+export interface CopilotResponse {
+  answer: string;
+  relevantOfts: string[];
+  remaining?: number;
+  limit?: number;
+}
+
+export async function askSecurityCopilot(question: string): Promise<CopilotResponse> {
   const res = await fetch(`${BASE}/sentinel/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

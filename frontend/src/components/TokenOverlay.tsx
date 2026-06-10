@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
-import type { WatchedStatus, TransactionIntent } from "../api.ts";
+import type { WatchedStatus, TransactionIntent, HistoryEntry } from "../api.ts";
 
 const SEPOLIA = "https://sepolia.mantlescan.xyz";
 const MAINNET  = "https://mantlescan.xyz";
@@ -60,13 +60,47 @@ function ScoreRing({ score, level }: { score: number; level: RiskLvl }) {
   );
 }
 
+function fmtDay(ts: number): string {
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// Score-over-time line chart — the per-OFT view of the continuous monitoring
+// record accumulated in score-history.jsonl since the Sentinel started watching.
+function HistoryChart({ history, color }: { history: HistoryEntry[]; color: string }) {
+  if (history.length < 2) return null;
+  const W = 320, H = 72, PAD = 4;
+  const coords = history
+    .map((p, i) => {
+      const x = PAD + (i / (history.length - 1)) * (W - PAD * 2);
+      const y = H - PAD - (p.score / 100) * (H - PAD * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <div>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block", background: "rgba(255,255,255,0.02)", borderRadius: 6 }}>
+        {[25, 50, 75].map(s => (
+          <line key={s} x1={PAD} x2={W - PAD} y1={H - PAD - (s / 100) * (H - PAD * 2)} y2={H - PAD - (s / 100) * (H - PAD * 2)} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+        ))}
+        <polyline points={coords} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--faint)", fontFamily: "var(--mono)", marginTop: 3 }}>
+        <span>{fmtDay(history[0].capturedAt)}</span>
+        <span>{history.length} checks</span>
+        <span>{fmtDay(history[history.length - 1].capturedAt)}</span>
+      </div>
+    </div>
+  );
+}
+
 interface TokenOverlayProps {
   watched: WatchedStatus;
+  history?: HistoryEntry[];
   onClose: () => void;
   onReport: () => void;
 }
 
-export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) {
+export function TokenOverlay({ watched, history = [], onClose, onReport }: TokenOverlayProps) {
   const lvl   = riskLevel(watched);
   const score = watched.assessment?.score ?? 0;
   const v     = watched.latestVerdict;
@@ -221,6 +255,14 @@ export function TokenOverlay({ watched, onClose, onReport }: TokenOverlayProps) 
                 </div>
               );
             })()}
+
+            {/* Score history */}
+            {history.length >= 2 && (
+              <div>
+                <div className="to-sec-lbl">Score history</div>
+                <HistoryChart history={history} color={riskColor(lvl)} />
+              </div>
+            )}
 
             {/* Monitored corridors */}
             <div>
