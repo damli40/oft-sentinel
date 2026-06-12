@@ -167,7 +167,7 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
 
   /* overlays as bottom sheets */
   .token-overlay { padding: 0; align-items: flex-end; }
-  .to-panel { max-width: 100%; border-radius: 20px 20px 0 0; max-height: 88vh; }
+  .to-panel { max-width: 100%; border-radius: 20px 20px 0 0; max-height: 88vh; max-height: 88dvh; }
   .to-main { grid-template-columns: 1fr; }
   .to-score-col { border-right: none; border-bottom: 1px solid var(--border-soft); flex-direction: row; justify-content: flex-start; padding: 16px 18px; gap: 16px; }
   .to-rl { flex: 1; }
@@ -176,6 +176,10 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
   .to-tkn { font-size: 18px; }
   .to-adr { display: none; }          /* full address would shove the X off the right edge */
   .to-x { margin-left: auto; font-size: 22px; padding: 8px; line-height: 1; }
+
+  /* explainer tooltips (OFT/DVN): left-anchor to the term + cap width so they can't run off the screen edge */
+  .tipbox { left: 0; right: auto; width: min(230px, calc(100vw - 40px)); transform: translateX(0) translateY(4px); }
+  .tip:hover .tipbox { transform: translateX(0) translateY(0); }
 
   .copilot-overlay { padding: 0; align-items: flex-end; justify-content: stretch; }
   .copilot-panel { width: 100%; border-radius: 20px 20px 0 0; height: 72vh; max-height: 72vh; }

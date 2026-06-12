@@ -115,6 +115,14 @@ export function TokenOverlay({ watched, history = [], onClose, onReport }: Token
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // lock page scroll while open so the fixed overlay aligns to the viewport
+  // (prevents the close-X clipping off-screen on mobile after scrolling)
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   return createPortal(
     <div className="token-overlay on">
       <div className="to-bd" onClick={onClose} />
