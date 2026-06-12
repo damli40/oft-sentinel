@@ -34,10 +34,9 @@ interface Props {
   ofts: MantleOft[] | null;
   error?: string;
   status?: WatchedStatus[];
-  onPick: (ticker: string) => void;
 }
 
-export function MantleBoard({ ofts, error, status, onPick }: Props) {
+export function MantleBoard({ ofts, error, status }: Props) {
   const rows = ofts ?? [];
   const sorted = [...rows].sort((a, b) => b.usdVolume - a.usdVolume);
 
@@ -74,7 +73,7 @@ export function MantleBoard({ ofts, error, status, onPick }: Props) {
             const w = statusMap.get(o.ticker.toUpperCase());
             const monitored = !!o.address;
             return (
-              <tr key={o.oftName} onClick={() => onPick(o.ticker)}>
+              <tr key={o.oftName}>
                 <td className="rank">{String(i + 1).padStart(2, "0")}</td>
                 <td>
                   <div className="tk">{o.ticker}</div>

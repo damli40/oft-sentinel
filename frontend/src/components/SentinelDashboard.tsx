@@ -207,10 +207,12 @@ function DvnConcentrationPanel({ fleet, dvnMap, selectedDvn, onSelect }: DvnPane
 // ── Intelligence Feed ─────────────────────────────────────────────────────────
 
 function IntelFeed({ events }: { events: FeedEvent[] }) {
-  const endRef = useRef<HTMLDivElement>(null);
+  const feedRef = useRef<HTMLDivElement>(null);
 
+  // pin the newest line WITHIN the feed box — never scroll the page
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    const c = feedRef.current;
+    if (c) c.scrollTo({ top: c.scrollHeight, behavior: "smooth" });
   }, [events]);
 
   function rowClass(e: FeedEvent): string {
@@ -228,7 +230,7 @@ function IntelFeed({ events }: { events: FeedEvent[] }) {
   }
 
   return (
-    <div className="intel-feed">
+    <div className="intel-feed" ref={feedRef}>
       {events.length === 0 && (
         <div style={{ padding: "14px 16px", color: "var(--faint)", fontSize: 12, fontFamily: "var(--mono)" }}>
           No events yet. Run the Kelp replay.
@@ -245,7 +247,6 @@ function IntelFeed({ events }: { events: FeedEvent[] }) {
           </div>
         </div>
       ))}
-      <div ref={endRef} />
     </div>
   );
 }

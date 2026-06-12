@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { Aperture } from "./components/Aperture.tsx";
 import { Storyboard } from "./components/Storyboard.tsx";
 import { MantleBoard } from "./components/MantleBoard.tsx";
@@ -191,10 +191,13 @@ export default function App() {
       .catch(() => {}); // silent fail if backend is not running
   }, []);
 
+  // land at the top whenever the view changes — instant (bypass the global
+  // scroll-behavior:smooth, which would race the replay growing the page)
+  useLayoutEffect(() => { window.scrollTo({ top: 0, behavior: "instant" }); }, [view]);
+
   function openSentinel(kelp = false) {
     setRunKelpOnOpen(kelp);
     setView("sentinel");
-    window.scrollTo(0, 0);
   }
 
   function scrollToFleet() {
@@ -281,7 +284,6 @@ export default function App() {
             ofts={ofts}
             error={oftsError}
             status={status?.watched}
-            onPick={() => openSentinel(false)}
           />
 
           <div className="cta-band">

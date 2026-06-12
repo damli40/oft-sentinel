@@ -362,6 +362,7 @@ Then point the backend at your addresses via `AUDIT_REGISTRY_ADDRESS` / `ALERT_B
 
 ## Changelog
 
+- **2026-06-12** — Mobile UX: tapping "Open Sentinel" / "Kelp replay" no longer jump-scrolls the page (the live intel feed now scrolls within its own box, and the view opens at the top); leaderboard rows no longer navigate on tap (only the explicit buttons do), preventing accidental view-switches while scrolling on a phone. Fleet tiles stay tappable to open a bridge's detail modal.
 - **2026-06-12** — Mobile fixes: the token modal's close ✕ is now pinned and always reachable on phones (sticky header; the full contract address no longer pushes it off-screen), and the Mantle leaderboard columns realign on mobile (the `Address` header now hides together with its cell). Desktop unchanged. Verified at 390px.
 
 ---
