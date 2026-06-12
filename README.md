@@ -360,6 +360,12 @@ Then point the backend at your addresses via `AUDIT_REGISTRY_ADDRESS` / `ALERT_B
 
 ---
 
+## Changelog
+
+- **2026-06-12** — Mobile fixes: the token modal's close ✕ is now pinned and always reachable on phones (sticky header; the full contract address no longer pushes it off-screen), and the Mantle leaderboard columns realign on mobile (the `Address` header now hides together with its cell). Desktop unchanged. Verified at 390px.
+
+---
+
 ## Post-Hackathon: LayerZero Security Intelligence Network (LSIN)
 
 OFT Sentinel is LSIN v0: Mantle-focused, OFT-scoped. The architecture generalizes to every LayerZero V2 OApp across all ~170 EVM EIDs — the detection engine already discovers and reads corridors on all of them.

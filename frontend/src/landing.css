@@ -156,6 +156,8 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
 
   .board { overflow-x: auto; }
   .board .addr { display: none; }
+  /* hide the Address header + cell together so columns stay aligned (was: cell hidden, header left behind → row shifted left) */
+  .board th:nth-child(3), .board td:nth-child(3) { display: none; }
   .board th, .board td { padding: 11px 12px; font-size: 12px; }
 
   .cta-band { padding: 28px 24px; flex-direction: column; gap: 20px; }
@@ -170,8 +172,11 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
   .to-main { grid-template-columns: 1fr; }
   .to-score-col { border-right: none; border-bottom: 1px solid var(--border-soft); flex-direction: row; justify-content: flex-start; padding: 16px 18px; gap: 16px; }
   .to-rl { flex: 1; }
-  .to-hd { padding: 14px 18px; }
+  /* pin the header so the close X never scrolls out of reach on a phone */
+  .to-hd { padding: 14px 18px; position: sticky; top: 0; z-index: 2; background: var(--surface-2); box-shadow: 0 1px 0 var(--border-soft); }
   .to-tkn { font-size: 18px; }
+  .to-adr { display: none; }          /* full address would shove the X off the right edge */
+  .to-x { margin-left: auto; font-size: 22px; padding: 8px; line-height: 1; }
 
   .copilot-overlay { padding: 0; align-items: flex-end; justify-content: stretch; }
   .copilot-panel { width: 100%; border-radius: 20px 20px 0 0; height: 72vh; max-height: 72vh; }
