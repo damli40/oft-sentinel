@@ -118,6 +118,21 @@ export function telegramRecipients(v: SentinelVerdict): { publicChatId: string |
   return { publicChatId, teamChatIds };
 }
 
+/** Escape text for Telegram HTML parse_mode (only <, >, & are special). */
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** <code> address/hash → tap-to-copy in Telegram clients. */
+function code(s: string): string {
+  return `<code>${esc(s)}</code>`;
+}
+
+/** Hyperlink that hides the long explorer URL behind a short label. */
+function link(label: string, url: string): string {
+  return `<a href="${esc(url)}">${esc(label)}</a>`;
+}
+
 export async function sendTelegram(chatId: string | null, text: string, label: string): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token || !chatId) {
@@ -127,7 +142,7 @@ export async function sendTelegram(chatId: string | null, text: string, label: s
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
   }).catch((e) => {
     console.error(`[alert:telegram:${label}] failed:`, e.message);
     return null;
@@ -164,38 +179,67 @@ export async function dispatchAlert(
     console.error("[alert] on-chain AlertBus failed:", e.shortMessage ?? e.message);
   }
 
-  const txLine = alertTxHash ? `AlertBus: ${SEPOLIA_EXPLORER}/tx/${alertTxHash}` : "AlertBus: unavailable";
-  const attestationLine = v.attestTxHash ? `Attestation: ${SEPOLIA_EXPLORER}/tx/${v.attestTxHash}` : "Attestation: unavailable";
-  const reasons = v.reasons.length ? v.reasons.join("; ") : v.verdict;
-  const publicMessage = [
-    `OFT SENTINEL ALERT`,
-    `${v.riskLevel}: ${v.ticker}`,
+  const txLine = alertTxHash
+    ? `AlertBus: ${link(alertTxHash.slice(0, 10) + "…", `${SEPOLIA_EXPLORER}/tx/${alertTxHash}`)}`
+    : "AlertBus: unavailable";
+  const attestationLine = v.attestTxHash
+    ? `Attestation: ${link(v.attestTxHash.slice(0, 10) + "…", `${SEPOLIA_EXPLORER}/tx/${v.attestTxHash}`)}`
+    : "Attestation: unavailable";
+  const reasons = esc(v.reasons.length ? v.reasons.join("; ") : v.verdict);
+  const ticker = esc(v.ticker);
+  const emoji = v.riskLevel === "CRITICAL" ? "🚨" : "⚠️";
+  const remediationBlock = v.tis && v.tis.length > 0
+    ? `<blockquote expandable>` +
+        v.tis.slice(0, 3).map((t, i) =>
+          esc(`${i + 1}. [${t.severity}] ${t.action}${t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}`)
+        ).join("\n") +
+        `</blockquote>`
+    : null;
+
+  // Public CRITICAL gets a spaced, divider-sectioned layout; other severities stay compact.
+  const DIV = "──────────────";
+  const criticalPublicMessage = [
+    `🚨 <b>OFT SENTINEL — CRITICAL</b>`,
     ``,
-    `Score: ${v.score}/100`,
+    `<b>${ticker}</b>  ·  Score <b>${v.score}/100</b>`,
+    ``,
+    DIV,
+    `📋 <b>Reason</b>`,
+    reasons,
+    ``,
+    DIV,
+    `🔗 <b>On-chain</b>`,
+    `${link("OFT ↗", `${MAINNET_EXPLORER}/address/${v.oft}`)}  ·  ${
+      v.attestTxHash ? link("Attestation ↗", `${SEPOLIA_EXPLORER}/tx/${v.attestTxHash}`) : "Attestation unavailable"
+    }`,
+    alertTxHash ? link("AlertBus ↗", `${SEPOLIA_EXPLORER}/tx/${alertTxHash}`) : "AlertBus unavailable",
+    ``,
+    DIV,
+    `🛠 <b>Remediation</b>`,
+    remediationBlock ?? "No automated remediation available.",
+  ].join("\n");
+  const compactPublicMessage = [
+    `${emoji} <b>OFT SENTINEL ALERT</b>`,
+    `<b>${v.riskLevel}: ${ticker}</b>`,
+    ``,
+    `Score: <b>${v.score}/100</b>`,
     `Reason: ${reasons}`,
     ``,
-    `OFT: ${MAINNET_EXPLORER}/address/${v.oft}`,
+    `OFT: ${link(v.oft, `${MAINNET_EXPLORER}/address/${v.oft}`)}`,
     attestationLine,
     txLine,
   ].join("\n");
-  const tisLines = v.tis && v.tis.length > 0
-    ? [
-        ``,
-        `Remediation:`,
-        ...v.tis.slice(0, 3).map((t, i) =>
-          `${i + 1}. [${t.severity}] ${t.action}${t.corridors?.length ? ` (${t.corridors.join(", ")})` : ""}`
-        ),
-      ]
-    : [];
+  const publicMessage = v.riskLevel === "CRITICAL" ? criticalPublicMessage : compactPublicMessage;
+  const tisLines = remediationBlock ? [``, `<b>Remediation</b>`, remediationBlock] : [];
   const teamMessage = [
-    `Action needed: ${v.ticker} drift detected`,
+    `${emoji} <b>Action needed: ${ticker} drift detected</b>`,
     ``,
-    `Risk: ${v.riskLevel}`,
-    `Score: ${v.score}/100`,
+    `Risk: <b>${v.riskLevel}</b>`,
+    `Score: <b>${v.score}/100</b>`,
     `Reason: ${reasons}`,
     ``,
-    `OFT: ${v.oft} (chain ${v.chainId})`,
-    `Recipient: ${recipient}`,
+    `OFT: ${code(v.oft)} (chain ${v.chainId})`,
+    `Recipient: ${code(recipient)}`,
     ``,
     attestationLine,
     txLine,
