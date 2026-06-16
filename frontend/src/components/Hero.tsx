@@ -27,13 +27,14 @@ export function Hero({ ofts, onOpenStory }: { ofts: MantleOft[] | null; onOpenSt
       </span>
 
       <h1 className="text-4xl sm:text-5xl font-bold tracking-tight leading-[1.06] max-w-2xl">
-        Watch the config.<br />
-        Stop the next <span className="text-lz-danger">$292M</span>.
+        Configurable trust,<br />
+        continuously <span className="text-lz-mint">proven</span>.
       </h1>
 
       <p className="text-lz-muted max-w-xl leading-relaxed">
-        An autonomous agent monitors every LayerZero OFT on Mantle and catches a dangerous
-        security change the moment it hits the chain.
+        LayerZero lets every token pick its own verifiers and thresholds, the most flexible
+        security model in crypto. Sentinel reads that config live on Mantle and proves it
+        stays safe, every five minutes.
       </p>
 
       <button

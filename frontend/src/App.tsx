@@ -124,18 +124,17 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
     <div className="hero">
       <div className="hero-copy">
         <span className="kicker">
-          <span className="live-dot" style={{ background: "var(--critical)", boxShadow: "0 0 8px var(--critical)" }} />
-          APRIL 2026 · $292,000,000 DRAINED IN 80 MINUTES
+          <span className="live-dot" style={{ background: "var(--scan)", boxShadow: "0 0 8px var(--scan)" }} />
+          AUTONOMOUS OFT SECURITY · LIVE ON MANTLE
         </span>
         <h1>
-          The bridge hack<br />
-          that <span className="grad">an agent</span><br />
-          would have caught.
+          Configurable trust,<br />
+          continuously <span className="grad">proven.</span>
         </h1>
         <p className="lede">
-          Kelp's rsETH bridge used a <b>single security checker</b>. One node was compromised.
-          $292M left in 80 minutes. <b>OFT Sentinel</b> watches every cross-chain bridge on Mantle
-          and writes on-chain proof the moment one becomes exploitable.
+          LayerZero lets every token pick its own verifiers, thresholds, and libraries,
+          <b> the most flexible security model in crypto</b>. <b>OFT Sentinel</b> reads that config
+          live on Mantle every five minutes and writes on-chain proof it stays safe.
         </p>
         <div className="cta-row">
           <button className="btn btn-primary" onClick={onSentinel}>
