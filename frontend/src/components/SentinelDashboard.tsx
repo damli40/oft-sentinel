@@ -15,6 +15,7 @@ import {
 import type { SentinelStatus, SentinelVerdict, WatchedStatus, FeedEvent, TransactionIntent, PolicyDecisionRecord, HistoryEntry } from "../api.ts";
 import { Aperture } from "./Aperture.tsx";
 import { TokenOverlay } from "./TokenOverlay.tsx";
+import { VerifyPdr } from "./VerifyPdr.tsx";
 import "../dashboard.css";
 
 const SEPOLIA = "https://sepolia.mantlescan.xyz";
@@ -671,6 +672,7 @@ function VerdictSpotlight({ verdict, status, onShowReport }: {
             <div style={{ fontSize: 10, color: "var(--text-2)", marginTop: 3 }}>
               keccak256(JSON.stringify(PDR)) == verdictHash — independently verifiable
             </div>
+            {verdict?.verdictHash && <VerifyPdr pdr={pdr} verdictHash={verdict.verdictHash} />}
           </div>
         )}
         {assessedOft && (

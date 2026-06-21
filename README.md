@@ -1,10 +1,12 @@
 # OFT Sentinel
 
-**Autonomous security monitoring for LayerZero OFTs on Mantle.**
+**Continuous trust-intelligence for omnichain assets on Mantle.**
 
 OFT Sentinel is an always-on agent that reads the live LayerZero DVN configuration for every high-value OFT on Mantle, detects security-relevant changes the moment they happen, writes immutable on-chain attestations with a verifiable Policy Decision Record, and alerts teams before funds move.
 
-Built for the **Mantle Turing Test Hackathon** (Phase 2, June 2026). Tracks: AI DevTools + Alpha & Data.
+It turns invisible trust assumptions into a **verifiable, machine-readable risk dataset** — a signal that is not visible in TVL, volume, or price, and that no block explorer indexes. Every verdict is reproducible: `keccak256(JSON.stringify(pdr)) == verdictHash`, on-chain.
+
+Built for the **Mantle Turing Test Hackathon** (Phase 2, June 2026) — **Mirana Alpha & Data track (Path A: Data & Analytics)**.
 
 ---
 
@@ -13,6 +15,26 @@ Built for the **Mantle Turing Test Hackathon** (Phase 2, June 2026). Tracks: AI 
 On 18 April 2026, attackers drained $292M from a LayerZero bridge in 80 minutes. The exploit vector: a single configuration change — one DVN dropped from two to one — that no monitoring system caught. A one-shot audit cannot catch a change it never sees again. An always-on agent can.
 
 OFT Sentinel answers the question that audits cannot: **did this protocol's security assumptions change since the last time anyone looked?**
+
+---
+
+## Why It Matters — Market & Business
+
+**The market has already priced this product.** Filling the rsETH hole took **DeFi United** — an Aave-led rescue across six protocols, a **~$314M war chest** — including **Mantle Treasury's commitment of up to 30,000 ETH** (MIP-34, the largest single loan in the rescue). Every contributor paid, after the fact and at crisis prices, for the *absence* of configuration monitoring. The pre-incident version of that protection costs a rounding error on any single contribution. Business potential for security tooling is usually a projection; here it is a ledger.
+
+**A dataset nobody else has.** Every investor can see TVL, volume, and price. Sentinel surfaces what they can't: **whether the trust assumptions securing an omnichain asset are getting stronger or weaker over time.** This config data is read live from the LayerZero endpoint, per corridor, every five minutes — it is **not indexed on Dune, Nansen, or any block explorer.** Sentinel is the only source, and it identifies deteriorating security before it becomes visible in TVL, volume, or price.
+
+**Who pays, and what they buy:**
+
+| Customer | Pain | What they buy |
+|---|---|---|
+| OFT issuer teams (Ethena, USDT0, mETH / cmETH, Ondo) | One silent config change is an existential incident; post-Kelp every lister asks "who's watching your config?" | 5-min drift alerts + machine-readable remediation + a public "monitored by Sentinel" attestation trail |
+| Protocol risk teams (lending, LRT, vaults) | Listed collateral degrades *after* the review | Continuous score feed + API to gate collateral |
+| Funds & quant desks | Bridge risk is unpriced until it detonates | Drift events as risk alpha; the Mantle Security Index as a benchmark |
+
+**Pricing.** Monitoring is priced as **the audit that never expires: ~$25–50K/yr per asset** — 365-day coverage of the layer a one-shot audit can't see, for a fraction of one audit's cost. The subscription is the wedge; the licensable on-chain risk dataset is the long-term business. Phase 1 is free while the public attestation track record accumulates — in a trust business, the ledger of verdicts *is* the moat.
+
+**Scales without re-engineering.** Marginal cost per asset is a handful of RPC reads per cycle; the rule engine is deterministic and versioned, so coverage grows without LLM cost; **adding a chain is configuration, not code** — the engine already discovers and reads corridors across all ~170 LayerZero V2 EIDs. Attestations run on Mantle Sepolia today; **mainnet attestation contracts are the first post-hackathon milestone.**
 
 ---
 
@@ -365,6 +387,31 @@ Then point the backend at your addresses via `AUDIT_REGISTRY_ADDRESS` / `ALERT_B
 - **2026-06-12** — More mobile fixes: the token modal's close ✕ no longer clips off-screen after scrolling (panel uses dynamic viewport height `dvh` + locks page scroll while open), and the OFT/DVN explainer tooltips on the home page no longer overflow the screen edge (left-anchored + width-capped).
 - **2026-06-12** — Mobile UX: tapping "Open Sentinel" / "Kelp replay" no longer jump-scrolls the page (the live intel feed now scrolls within its own box, and the view opens at the top); leaderboard rows no longer navigate on tap (only the explicit buttons do), preventing accidental view-switches while scrolling on a phone. Fleet tiles stay tappable to open a bridge's detail modal.
 - **2026-06-12** — Mobile fixes: the token modal's close ✕ is now pinned and always reachable on phones (sticky header; the full contract address no longer pushes it off-screen), and the Mantle leaderboard columns realign on mobile (the `Address` header now hides together with its cell). Desktop unchanged. Verified at 390px.
+
+---
+
+## Judging Criteria — Quick Reference
+
+**Part A — Mantle general**
+
+| Dimension | How OFT Sentinel answers it |
+|---|---|
+| **Technical** | Live viem reads of the LZ endpoint on Mantle mainnet with a multi-RPC quorum (one bad node can't blind it); deterministic 15-check engine; verdicts attested on-chain with a recomputable hash; 32 backend + 13 contract tests; contracts verified on Mantlescan |
+| **Ecosystem fit** | Monitors the entire live Mantle OFT fleet (every all-time ≥$1M-volume V2 OFT, $13.8B+ cross-chain volume) reading Mantle-native LZ config; strengthens the asset layer Mantle is courting (stablecoins, RWAs, LRTs) |
+| **Business potential** | Realized willingness-to-pay (~$314M DeFi United, Mantle's 30K ETH); priced ~$25–50K/yr per asset ("the audit that never expires") with a licensable-dataset expansion; named customer segments (see *Why It Matters*) |
+| **Innovation** | A new data category — trust-assumption drift — that audits and explorers structurally cannot see; reproducible because no LLM decides the verdict |
+| **User experience** | Zero signup, zero gas to view; replay-first front door; plain-English Security Copilot explains any score |
+
+**Part B — Mirana Alpha & Data (Path A: Data & Analytics)**
+
+| Dimension | How OFT Sentinel answers it |
+|---|---|
+| **Insight value** | Surfaces whether the trust assumptions securing an asset are strengthening or weakening over time — actionable, comprehensible, and not derivable from TVL/volume/price |
+| **Data source quality** | Read live from the LayerZero endpoint per corridor, multi-RPC, every 5 min, across the whole Mantle fleet; Mantle-native and **not indexed on Dune, Nansen, or any explorer** |
+| **Investment utility** | A lending protocol gates collateral on it; a fund reads drift events as risk alpha; an issuer proves it's monitored — all backed by a recomputable on-chain record a professional can audit |
+| **Scalability & sustainability** | Near-zero marginal cost per asset; deterministic versioned engine; adding a chain is config, not code; pipeline stays live on a paid RPC tier at first revenue; generalizes to all ~170 LZ V2 EIDs (LSIN) |
+
+**Verifiability throughout:** every attestation carries `keccak256(JSON.stringify(pdr)) == verdictHash` — reproducible, not claimed.
 
 ---
 
