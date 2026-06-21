@@ -12,7 +12,7 @@ Built for the **Mantle Turing Test Hackathon** (Phase 2, June 2026) — **Mirana
 
 ## The Problem
 
-On 18 April 2026, attackers drained $292M from a LayerZero bridge in 80 minutes. The exploit vector: a single configuration change — one DVN dropped from two to one — that no monitoring system caught. A one-shot audit cannot catch a change it never sees again. An always-on agent can.
+On 18 April 2026, $292M drained from the Kelp bridge in 80 minutes. LayerZero worked as designed. The loss came from one configuration change: someone dropped the verifier set from two DVNs to one, and it sat in public on-chain state for months with nobody watching. LayerZero makes cross-chain security configurable, and that flexibility is the point. A configuration can still drift toward danger after deployment, and a one-shot audit can't catch a change it never sees again. An always-on agent can.
 
 OFT Sentinel answers the question that audits cannot: **did this protocol's security assumptions change since the last time anyone looked?**
 
@@ -152,8 +152,8 @@ Score starts at 100; deductions apply per finding (floor 0). The score is then c
 7. **Cross-chain DVN Mismatch** (HIGH) — send DVN set ≠ receive DVN set; permanent message block
 8. **Block Confirmations < 15** (MEDIUM) — re-org attack surface
 9. **Enforced Options Missing** (LOW) — zero-gas messages can permanently stick nonces; emitted once fleet-wide (per-corridor stacking would let 20 LOWs outweigh a CRITICAL)
-10. **Send Library Not Pinned** (HIGH) — LZ Labs OneSig (3-of-5 EOAs) can redirect outbound verification
-11. **Receive Library Not Pinned** (CRITICAL) — LZ Labs can change inbound acceptance rules, bypassing DVN config
+10. **Send Library Not Pinned** (HIGH) — the OFT uses the default send library; its admin can upgrade it and change outbound verification. Pinning a fixed library removes the dependency
+11. **Receive Library Not Pinned** (CRITICAL) — the OFT uses the default receive library; its admin can upgrade it to change inbound acceptance rules independent of the DVN set. Pinning the receive library closes the gap
 12. **Confirmation Mismatch** (HIGH) — send confs < receive required; permanent message block
 13. **Owner Type: EOA** (HIGH) — single private key controls all OFT configuration
 14. **Proxy Upgrade Control** (HIGH/MEDIUM) — implementation upgradeable by EOA (HIGH) or multisig (MEDIUM)
