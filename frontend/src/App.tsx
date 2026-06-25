@@ -4,9 +4,11 @@ import { Storyboard } from "./components/Storyboard.tsx";
 import { MantleBoard } from "./components/MantleBoard.tsx";
 import { SentinelDashboard } from "./components/SentinelDashboard.tsx";
 import { FlowAnimation } from "./components/FlowAnimation.tsx";
+import { OftArchitecture } from "./components/OftArchitecture.tsx";
 import { getMantleOfts, getSentinelStatus } from "./api.ts";
 import type { MantleOft, SentinelStatus } from "./api.ts";
 import "./landing.css";
+import "./architecture.css";
 
 type View = "app" | "story" | "sentinel";
 
@@ -273,6 +275,8 @@ export default function App() {
           </div>
 
           <FlowAnimation />
+
+          <OftArchitecture />
 
           <div className="sec-title" id="boardSec">
             <h2>Mantle OFT leaderboard</h2>
