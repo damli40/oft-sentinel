@@ -146,6 +146,17 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
             See the fleet
           </button>
         </div>
+        <a
+          className="btn btn-ghost cta-telegram"
+          href="https://t.me/oft_sentinel_watcher"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M21.9 4.1c.2-.9-.6-1.6-1.5-1.3L2.7 9.6c-1 .4-.9 1.8 0 2.1l4.5 1.4 1.7 5.4c.3.9 1.4 1.1 2 .5l2.5-2.4 4.6 3.4c.8.6 1.9.2 2.1-.8l1.8-15.1zM8.2 12.6l9.6-6-7.5 7-.3 3-1.8-4z" />
+          </svg>
+          Get live alerts on Telegram
+        </a>
         <div className="live-strip">
           <div className="stat">
             <div className="v tnum" id="s-vol">

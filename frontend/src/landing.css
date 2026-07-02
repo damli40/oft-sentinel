@@ -51,6 +51,7 @@
 .hero .lede { font-size: 18px; line-height: 1.55; color: var(--text-2); margin: 24px 0 0; max-width: 540px; }
 .hero .lede b { color: var(--text); font-weight: 600; }
 .hero .cta-row { display: flex; gap: 14px; align-items: center; margin-top: 34px; }
+.hero .cta-telegram { margin-top: 14px; text-decoration: none; }
 .hero .live-strip { display: flex; gap: 30px; margin-top: 44px; padding-top: 26px; border-top: 1px solid var(--border-soft); }
 .hero .live-strip .stat .v { font-family: var(--mono); font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
 .hero .live-strip .stat .l { font-size: 11.5px; color: var(--faint); margin-top: 4px; font-family: var(--mono); letter-spacing: .04em; }
@@ -141,6 +142,7 @@ footer.foot { margin-top: 90px; padding: 40px 0 60px; border-top: 1px solid var(
   .hero .lede { font-size: 15px; }
   .hero .cta-row { flex-wrap: wrap; gap: 10px; }
   .hero .cta-row .btn { flex: 1; min-width: 140px; justify-content: center; }
+  .hero .cta-telegram { width: 100%; justify-content: center; margin-top: 10px; }
   .hero .live-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
   .hero .live-strip .stat .v { font-size: 20px; }
   .hero .radar-card { width: 100%; max-width: none; aspect-ratio: 16/10; margin: 0 auto; }
