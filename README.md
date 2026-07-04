@@ -12,7 +12,9 @@ Built for the **Mantle Turing Test Hackathon** (Phase 2, June 2026) — **Mirana
 
 ## The Problem
 
-On 18 April 2026, $292M drained from the Kelp bridge in 80 minutes. LayerZero worked as designed. The loss came from one configuration change: someone dropped the verifier set from two DVNs to one, and it sat in public on-chain state for months with nobody watching. LayerZero makes cross-chain security configurable, and that flexibility is the point. A configuration can still drift toward danger after deployment, and a one-shot audit can't catch a change it never sees again. An always-on agent can.
+On 18 April 2026, $292M drained from the Kelp bridge in 80 minutes. LayerZero worked as designed. The loss came from one configuration change: someone dropped the verifier set from two DVNs to one, and it sat in public on-chain state for two years with nobody watching. LayerZero makes cross-chain security configurable, and that flexibility is the point. A configuration can still drift toward danger after deployment, and a one-shot audit can't catch a change it never sees again. An always-on agent can.
+
+**Configuration changes like that are rare — and rarity is exactly why the check must be automated.** Teams build process around what happens weekly; nobody stays vigilant for a once-in-two-years event. The one monitoring cycle that matters looks identical to the hundred thousand quiet ones before it. Only a machine is present for it. Hence Sentinel.
 
 OFT Sentinel answers the question that audits cannot: **did this protocol's security assumptions change since the last time anyone looked?**
 
