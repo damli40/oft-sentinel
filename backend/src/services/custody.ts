@@ -9,14 +9,14 @@ import type { CustodyDeclaration, CustodyType } from "../types.js";
 // a few entries — a read per assessment is nothing.
 const DECLARATIONS_BASENAME = "custody-declarations.json";
 
-const ALLOWED_CUSTODY_TYPES: ReadonlySet<string> = new Set<CustodyType>([
+export const ALLOWED_CUSTODY_TYPES: ReadonlySet<string> = new Set<CustodyType>([
   "eoa_hot",
   "fireblocks_mpc",
   "safe_multisig",
   "unknown",
 ]);
 
-function declarationsFile(): string {
+export function declarationsFile(): string {
   const dataDir = process.env.DATA_DIR
     ? resolve(process.env.DATA_DIR)
     : join(dirname(fileURLToPath(import.meta.url)), "..", "..", "data");

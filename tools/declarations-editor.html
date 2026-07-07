@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Custody Declarations Editor</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem; background: #0b0e14; color: #d6dbe4;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-width: 1100px; margin-inline: auto;
+  }
+  h1 { font-size: 1.1rem; letter-spacing: .04em; }
+  h1 small { color: #6b7280; font-weight: normal; }
+  fieldset { border: 1px solid #232936; border-radius: 8px; margin: 0 0 1rem; padding: 1rem; }
+  legend { color: #8b93a3; padding: 0 .5rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; }
+  label { color: #8b93a3; font-size: .8rem; display: block; margin-bottom: .25rem; }
+  input, select, button {
+    font: inherit; color: inherit; background: #12161f; border: 1px solid #2a3140;
+    border-radius: 6px; padding: .4rem .6rem;
+  }
+  input:focus, select:focus { outline: 1px solid #4f6ef7; }
+  button { cursor: pointer; background: #1a2130; }
+  button:hover { background: #232c40; }
+  button.primary { background: #2743c7; border-color: #3b57e0; }
+  button.primary:hover { background: #3050e0; }
+  button.danger { color: #f87171; }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+  .row > div { display: flex; flex-direction: column; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: .75rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #1c2230; white-space: nowrap; }
+  th { color: #8b93a3; font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; }
+  td input[type=text] { width: 100%; min-width: 7rem; }
+  td input.address { min-width: 26rem; }
+  td input.chain { width: 5.5rem; min-width: 5.5rem; }
+  #msg { margin: .75rem 0; padding: .6rem .8rem; border-radius: 6px; display: none; white-space: pre-wrap; }
+  #msg.ok { display: block; background: #10331f; color: #6ee7a0; border: 1px solid #1d5c38; }
+  #msg.err { display: block; background: #38141a; color: #fda4af; border: 1px solid #6b1f2b; }
+  #impact { color: #8b93a3; font-size: .85rem; }
+  #impact b { color: #d6dbe4; }
+  .hint { color: #6b7280; font-size: .78rem; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>custody declarations <small>— operator editor (local tool, not deployed)</small></h1>
+
+<fieldset>
+  <legend>backend</legend>
+  <div class="row">
+    <div>
+      <label for="base">backend url</label>
+      <input id="base" type="text" size="42" value="http://localhost:3001" list="bases" />
+      <datalist id="bases">
+        <option value="http://localhost:3001"></option>
+        <option value="https://backend-production-d16e.up.railway.app"></option>
+      </datalist>
+    </div>
+    <div>
+      <label for="token">admin token</label>
+      <input id="token" type="password" size="34" placeholder="ADMIN_TOKEN" autocomplete="off" />
+    </div>
+    <div><button id="load" class="primary">Load</button></div>
+  </div>
+  <p class="hint">token is kept in sessionStorage only. 404 on load = ADMIN_TOKEN not set on that backend.</p>
+</fieldset>
+
+<fieldset>
+  <legend>declarations</legend>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>chain id</th><th>oft address</th><th>custody type</th><th>declared by</th><th>declared at</th><th>verified</th><th></th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  </div>
+  <div class="row">
+    <button id="add">+ add row</button>
+    <button id="save" class="primary">Save (replace file)</button>
+  </div>
+  <p class="hint">save replaces the whole file. removing every row and saving clears all declarations. changes apply on the next assessment — no restart.</p>
+</fieldset>
+
+<div id="msg"></div>
+<div id="impact"></div>
+
+<script>
+const CUSTODY_TYPES = ["eoa_hot", "fireblocks_mpc", "safe_multisig", "unknown"];
+const $ = (id) => document.getElementById(id);
+const rows = $("rows");
+
+$("token").value = sessionStorage.getItem("admin_token") || "";
+$("token").addEventListener("input", () => sessionStorage.setItem("admin_token", $("token").value));
+
+const api = () => $("base").value.replace(/\/+$/, "") + "/api/sentinel/declarations";
+const headers = () => ({ authorization: "Bearer " + $("token").value, "content-type": "application/json" });
+
+function msg(kind, text) { const m = $("msg"); m.className = kind; m.textContent = text; }
+
+function addRow(key = "", decl = {}) {
+  const [chainId = "", address = ""] = key.split(":");
+  const tr = document.createElement("tr");
+  // Values are set via .value (not HTML interpolation) so loaded strings with
+  // quotes/angle brackets can't break out of the attribute.
+  tr.innerHTML = `
+    <td><input type="text" class="chain" placeholder="5000" /></td>
+    <td><input type="text" class="address" placeholder="0x…40 hex chars" spellcheck="false" /></td>
+    <td><select>${CUSTODY_TYPES.map(t => `<option>${t}</option>`).join("")}</select></td>
+    <td><input type="text" class="by" placeholder="who declared" /></td>
+    <td><input type="text" class="at" /></td>
+    <td><input type="checkbox" /></td>
+    <td><button class="danger" title="remove row">✕</button></td>`;
+  tr.querySelector(".chain").value = chainId;
+  tr.querySelector(".address").value = address;
+  tr.querySelector("select").value = CUSTODY_TYPES.includes(decl.custodyType) ? decl.custodyType : "unknown";
+  tr.querySelector(".by").value = decl.declaredBy ?? "";
+  tr.querySelector(".at").value = decl.declaredAt ?? new Date().toISOString().slice(0, 10);
+  tr.querySelector("input[type=checkbox]").checked = Boolean(decl.verified);
+  tr.querySelector("button").onclick = () => tr.remove();
+  rows.appendChild(tr);
+}
+
+function collect() {
+  const out = {};
+  const seen = new Set();
+  for (const tr of rows.querySelectorAll("tr")) {
+    const key = `${tr.querySelector(".chain").value.trim()}:${tr.querySelector(".address").value.trim()}`;
+    const by = tr.querySelector(".by").value.trim();
+    const at = tr.querySelector(".at").value.trim();
+    if (!/^\d+:0x[0-9a-fA-F]{40}$/.test(key)) throw new Error(`bad chainId/address: "${key}"`);
+    if (!by) throw new Error(`declaredBy is empty for ${key}`);
+    if (!at) throw new Error(`declaredAt is empty for ${key}`);
+    if (seen.has(key.toLowerCase())) throw new Error(`duplicate entry for ${key}`);
+    seen.add(key.toLowerCase());
+    out[key] = {
+      custodyType: tr.querySelector("select").value,
+      declaredBy: by,
+      declaredAt: at,
+      verified: tr.querySelector("input[type=checkbox]").checked,
+    };
+  }
+  return out;
+}
+
+$("add").onclick = () => addRow();
+
+$("load").onclick = async () => {
+  msg("", ""); $("impact").textContent = "";
+  try {
+    const res = await fetch(api(), { headers: headers() });
+    if (res.status === 404) return msg("err", "404 — declarations API not enabled on this backend (ADMIN_TOKEN unset).");
+    if (res.status === 401) return msg("err", "401 — wrong or missing admin token.");
+    if (!res.ok) return msg("err", `load failed: HTTP ${res.status}`);
+    const data = await res.json();
+    rows.innerHTML = "";
+    Object.entries(data).forEach(([k, d]) => addRow(k, d));
+    msg("ok", `loaded ${Object.keys(data).length} declaration(s) from ${$("base").value}`);
+  } catch (e) { msg("err", "load failed: " + e.message); }
+};
+
+$("save").onclick = async () => {
+  msg("", ""); $("impact").textContent = "";
+  let body;
+  try { body = collect(); } catch (e) { return msg("err", e.message); }
+  try {
+    const res = await fetch(api(), { method: "PUT", headers: headers(), body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 404) return msg("err", "404 — declarations API not enabled on this backend (ADMIN_TOKEN unset).");
+    if (res.status === 401) return msg("err", "401 — wrong or missing admin token.");
+    if (!res.ok) return msg("err", `save rejected (file untouched): ${data.error ?? "HTTP " + res.status}`);
+    msg("ok", `saved ${Object.keys(data).length} declaration(s). takes effect on the next assessment.`);
+    showImpact(Object.keys(body));
+  } catch (e) { msg("err", "save failed: " + e.message); }
+};
+
+// Post-save check: re-fetch live status and show the current posture of any
+// watched asset the edited keys touch — an immediate before/after signal.
+async function showImpact(keys) {
+  try {
+    const res = await fetch($("base").value.replace(/\/+$/, "") + "/api/sentinel/status");
+    if (!res.ok) return;
+    const { watched = [] } = await res.json();
+    const wanted = new Set(keys.map(k => k.toLowerCase()));
+    const hits = watched.filter(w => wanted.has(`${w.chainId}:${(w.address || "").toLowerCase()}`));
+    if (!hits.length) { $("impact").textContent = "no watched asset matches the edited keys (status unchanged)."; return; }
+    $("impact").innerHTML = "live status now: " + hits
+      .map(w => `<b>${w.ticker}</b> — ${w.assessment?.riskLevel ?? "?"} (score ${w.assessment?.score ?? "?"})`)
+      .join(" · ");
+  } catch { /* impact display is best-effort */ }
+}
+
+addRow();
+</script>
+</body>
+</html>
