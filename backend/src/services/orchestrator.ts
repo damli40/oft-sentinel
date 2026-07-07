@@ -1,10 +1,8 @@
 import type { OftSnapshot, WatchedOft, SentinelVerdict, Finding, RiskLevel, TransactionIntent, PolicyDecisionRecord } from "../types.js";
-import { detectDrift, assessSnapshot } from "./drift.js";
+import { detectDrift, assessSnapshot, RULES_VERSION } from "./drift.js";
 import { verdictHash, attest } from "./attestor.js";
 import { dispatchAlert } from "./alerts.js";
 import { getSnapshot, putSnapshot, recordVerdict } from "./snapshot-store.js";
-
-const RULES_VERSION = "1.0.0";
 
 function buildPdr(
   oft: string,

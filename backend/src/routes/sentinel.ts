@@ -2,7 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { getWatched, pollOnce, runKelpReplay, runLibraryRevertReplay, runRpcConflictReplay, resetDemo } from "../services/sentinel.js";
 import { getVerdicts, getSnapshot, latestVerdict, getScoreHistory, getFeedEvents } from "../services/snapshot-store.js";
-import { assessSnapshot } from "../services/drift.js";
+import { assessSnapshot, RULES_VERSION } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
 import { askCopilot } from "../services/ask.js";
 import { loadDvnMeta, resolveDvn } from "../services/lz-config.js";
@@ -134,6 +134,7 @@ router.get("/status", async (_req: Request, res: Response) => {
     msiBreakdown,
     registry: process.env.AUDIT_REGISTRY_ADDRESS,
     alertBus: process.env.ALERT_BUS_ADDRESS,
+    rulesVersion: RULES_VERSION,
   });
 });
 

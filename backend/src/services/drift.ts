@@ -1,6 +1,11 @@
-import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, PreflightResult } from "../types.js";
+import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, PreflightResult, CustodyDeclaration } from "../types.js";
 import { computeScore } from "./score.js";
 import { loadDvnMeta, resolveDvn, isDvnDeprecated } from "./lz-config.js";
+import { getCustodyDeclaration } from "./custody.js";
+
+// Bumped 1.0.0 → 1.1.0: Owner Type rule now consumes custody declarations
+// (fireblocks_mpc downgrade). Attestations made under 1.0.0 stay valid as recorded.
+export const RULES_VERSION = "1.1.0";
 
 function activeRoutes(snap: OftSnapshot): RouteSnapshot[] {
   return snap.routes.filter((r) => r.isActive);
@@ -115,19 +120,28 @@ function clampScore(raw: number, risk: RiskLevel): number {
  *   CRITICAL: 1-of-1 required DVN (Kelp rsETH exploit pattern)
  *   CRITICAL: deprecated DVN in required set (per LZ metadata)
  *   HIGH:     cross-chain DVN name mismatch (send vs receive — permanent message block)
- *   HIGH:     OFT owner is an EOA
+ *   HIGH:     OFT owner is an EOA (LOW advisory if Fireblocks MPC custody is declared)
  *   HIGH:     proxy upgrade controlled by EOA (not a multisig)
  *   MEDIUM:   2-of-2 required DVNs (no redundancy)
  *   MEDIUM:   block confirmations < 15
  *   MEDIUM:   send library is the upgradeable default (not pinned)
  *   MEDIUM:   proxy upgrade controlled by a multisig (better than EOA, still notable)
  */
-export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promise<{
+export async function assessSnapshot(
+  snap: OftSnapshot,
+  ticker?: string,
+  // Custody declaration for this OFT's owner key. `undefined` = look it up from
+  // the declarations store; `null` = explicitly none (tests / callers that
+  // already resolved it). Declarations are an engine input and get embedded in
+  // the findings they influence, so the PDR hash stays recomputable.
+  custody?: CustodyDeclaration | null,
+): Promise<{
   findings: Finding[];
   score: number;
   riskLevel: RiskLevel;
   tis: TransactionIntent[];
 }> {
+  const custodyDecl = custody !== undefined ? custody : getCustodyDeclaration(snap.oft, snap.chainId);
   const findings: Finding[] = [];
   // TIS: keyed by "intent|dvnAddress" to collapse identical issues across corridors into one entry.
   const tisMap = new Map<string, TransactionIntent>();
@@ -436,21 +450,40 @@ export async function assessSnapshot(snap: OftSnapshot, ticker?: string): Promis
   }
 
   // ── Owner type ───────────────────────────────────────────────────────────
+  // On-chain data cannot distinguish an MPC-custodied EOA (e.g. Fireblocks)
+  // from a raw hot wallet, so a declared custody type modulates this rule:
+  //   fireblocks_mpc → LOW advisory, marked declared-unverified
+  //   safe_multisig  → HIGH + mismatch note (a real Safe is a contract, not an EOA)
+  //   eoa_hot / unknown / none → HIGH, unchanged
   if (snap.ownerIsContract === false) {
-    const f: Finding = {
-      severity: "HIGH",
-      check: "Owner Type",
-      detail: "OFT owner is an EOA: config can be changed by a single private key.",
-    };
-    findings.push(f);
-    addTIS("transfer_ownership_to_multisig", null, {
-      intent: "transfer_ownership_to_multisig",
-      action: "Transfer OFT ownership to a multisig (e.g. Gnosis Safe)",
-      currentState: "EOA owner: single private key controls all configuration",
-      targetState: "Multisig owner: M-of-N signers required for config changes",
-      reason: "EOA ownership means a single key compromise can alter DVN config, message libraries, or peer addresses",
-      severity: "HIGH",
-    }, f);
+    if (custodyDecl?.custodyType === "fireblocks_mpc") {
+      findings.push({
+        severity: "LOW",
+        check: "Owner Type",
+        detail: "owner is EOA on-chain; declared Fireblocks MPC custody (declared, unverified).",
+        custodyDeclaration: custodyDecl,
+      });
+      // Advisory only — no ownership-transfer remediation demanded for declared MPC.
+    } else {
+      const mismatch = custodyDecl?.custodyType === "safe_multisig";
+      const f: Finding = {
+        severity: "HIGH",
+        check: "Owner Type",
+        detail: mismatch
+          ? "OFT owner is an EOA: config can be changed by a single private key. Note: declared Safe multisig custody contradicts chain state (a Safe is a contract, not an EOA)."
+          : "OFT owner is an EOA: config can be changed by a single private key.",
+        ...(custodyDecl ? { custodyDeclaration: custodyDecl } : {}),
+      };
+      findings.push(f);
+      addTIS("transfer_ownership_to_multisig", null, {
+        intent: "transfer_ownership_to_multisig",
+        action: "Transfer OFT ownership to a multisig (e.g. Gnosis Safe)",
+        currentState: "EOA owner: single private key controls all configuration",
+        targetState: "Multisig owner: M-of-N signers required for config changes",
+        reason: "EOA ownership means a single key compromise can alter DVN config, message libraries, or peer addresses",
+        severity: "HIGH",
+      }, f);
+    }
   }
 
   // ── Proxy upgrade path ───────────────────────────────────────────────────

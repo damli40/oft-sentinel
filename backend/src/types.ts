@@ -8,6 +8,23 @@ export interface Finding {
   severity: Severity;
   check: string;
   detail: string;
+  // Custody declaration consumed by the rule (Owner Type). Embedded so the PDR
+  // hash covers every engine input: same config + same declarations → same verdict.
+  custodyDeclaration?: CustodyDeclaration;
+}
+
+// ── Custody declarations ──────────────────────────────────────────────────
+// Self-declared, unverified custody type for an OFT's owner key. On-chain data
+// cannot distinguish a Fireblocks MPC-custodied EOA from a raw hot wallet, so
+// teams declare (relayed manually for now) and the engine consumes the attestation.
+
+export type CustodyType = "eoa_hot" | "fireblocks_mpc" | "safe_multisig" | "unknown";
+
+export interface CustodyDeclaration {
+  custodyType: CustodyType;
+  declaredBy: string;
+  declaredAt: string; // ISO date of the declaration
+  verified: boolean;  // always false until a verification path exists
 }
 
 export interface DvnRow {
@@ -107,7 +124,7 @@ export interface PolicyDecisionRecord {
   riskLevel: RiskLevel;
   evaluatedAt: number; // unix ms; matches what was hashed and submitted on-chain
   agentId: number;     // ERC-8004 token ID (SENTINEL_AGENT_ID env)
-  rulesVersion: string; // "1.0.0"
+  rulesVersion: string; // "1.1.0" since custody declarations; attestations made under "1.0.0" stay valid as recorded
 }
 
 /** A stored Sentinel verdict — the off-chain record mirrored by an on-chain attestation. */

@@ -1,0 +1,9 @@
+{
+  "_comment": "Template for DATA_DIR/custody-declarations.json on the Railway volume. Keyed by chainId:oftAddress. custodyType: eoa_hot | fireblocks_mpc | safe_multisig | unknown. Declarations are self-declared and unverified; the engine marks them 'declared, unverified' in the PDR. Edit the live file manually; changes take effect on the next assessment, no restart needed.",
+  "5000:0x0000000000000000000000000000000000001337": {
+    "custodyType": "fireblocks_mpc",
+    "declaredBy": "oft team (relayed)",
+    "declaredAt": "2026-07-07",
+    "verified": false
+  }
+}
