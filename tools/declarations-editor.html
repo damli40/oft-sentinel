@@ -96,7 +96,7 @@ $("token").value = sessionStorage.getItem("admin_token") || "";
 $("token").addEventListener("input", () => sessionStorage.setItem("admin_token", $("token").value));
 
 const api = () => $("base").value.replace(/\/+$/, "") + "/api/sentinel/declarations";
-const headers = () => ({ authorization: "Bearer " + $("token").value, "content-type": "application/json" });
+const headers = () => ({ authorization: "Bearer " + $("token").value.trim(), "content-type": "application/json" });
 
 function msg(kind, text) { const m = $("msg"); m.className = kind; m.textContent = text; }
 
