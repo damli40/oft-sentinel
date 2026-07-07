@@ -95,7 +95,14 @@ const rows = $("rows");
 $("token").value = sessionStorage.getItem("admin_token") || "";
 $("token").addEventListener("input", () => sessionStorage.setItem("admin_token", $("token").value));
 
-const api = () => $("base").value.replace(/\/+$/, "") + "/api/sentinel/declarations";
+// A scheme-less base ("backend-production….railway.app") would be fetched as a
+// path relative to this page's own origin — add the scheme so it can't be.
+const baseUrl = () => {
+  let b = $("base").value.trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//.test(b)) b = (/^(localhost|127\.)/.test(b) ? "http://" : "https://") + b;
+  return b;
+};
+const api = () => baseUrl() + "/api/sentinel/declarations";
 const headers = () => ({ authorization: "Bearer " + $("token").value.trim(), "content-type": "application/json" });
 
 function msg(kind, text) { const m = $("msg"); m.className = kind; m.textContent = text; }
@@ -180,7 +187,7 @@ $("save").onclick = async () => {
 // watched asset the edited keys touch — an immediate before/after signal.
 async function showImpact(keys) {
   try {
-    const res = await fetch($("base").value.replace(/\/+$/, "") + "/api/sentinel/status");
+    const res = await fetch(baseUrl() + "/api/sentinel/status");
     if (!res.ok) return;
     const { watched = [] } = await res.json();
     const wanted = new Set(keys.map(k => k.toLowerCase()));
