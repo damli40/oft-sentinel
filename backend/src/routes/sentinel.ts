@@ -5,7 +5,8 @@ import { getVerdicts, getSnapshot, latestVerdict, getScoreHistory, getFeedEvents
 import { assessSnapshot, RULES_VERSION } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
 import { askCopilot } from "../services/ask.js";
-import { loadDvnMeta, resolveDvn } from "../services/lz-config.js";
+import { loadDvnMeta, resolveDvn, dvnMetaHash, MetadataUnavailableError, type DvnMeta } from "../services/lz-config.js";
+import { getChainRef } from "../services/chain-registry.js";
 
 export const router = Router();
 
@@ -56,12 +57,36 @@ router.get("/report/:address", async (req: Request, res: Response) => {
 // posture (assessSnapshot on the live snapshot — display only, no on-chain action),
 // and their latest drift verdict (the attested one).
 router.get("/status", async (_req: Request, res: Response) => {
-  const [list, dvnMeta] = await Promise.all([getWatched(), loadDvnMeta()]);
+  // A metadata blackout must not blank the dashboard. A 503 renders as "site broken",
+  // which reads to an operator as a deploy problem rather than "monitoring has stopped" —
+  // and stale tiles with no marker read as "everything is fine", which is the same class
+  // of bug (absence displayed as safety) that the per-chain dead-DVN fix exists to kill.
+  // Serve the tiles, stamp the response, let the UI grey them out.
+  let dvnMeta: DvnMeta;
+  let list: Awaited<ReturnType<typeof getWatched>>;
+  try {
+    [list, dvnMeta] = await Promise.all([getWatched(), loadDvnMeta()]);
+  } catch (e) {
+    if (e instanceof MetadataUnavailableError) {
+      return res.status(200).json({
+        watched: [], msi: null,
+        msiBreakdown: { critical: 0, atRisk: 0, safe: 0, unassessed: 0 },
+        registry: process.env.AUDIT_REGISTRY_ADDRESS,
+        alertBus: process.env.ALERT_BUS_ADDRESS,
+        rulesVersion: RULES_VERSION,
+        degraded: { reason: "dvn_metadata_unavailable", detail: e.message, since: Date.now() },
+      });
+    }
+    throw e;
+  }
   const watched = await Promise.all(list.map(async (w) => {
     const snap = getSnapshot(w.address, w.chainId);
     const a = snap ? await assessSnapshot(snap, w.ticker) : null;
-    // DVN addresses in send config are on the source chain (Mantle) — always resolve with "mantle".
-    const srcChainKey = "mantle";
+    // A DVN's identity is the (chainKey, address) pair. Send-side DVNs live on the OFT's
+    // OWN chain — resolving them against a hardcoded "mantle" gave every Ethereum and Base
+    // asset the wrong DVN names (same bug drift.ts fixed in rules 2.1.0). Unknown chain →
+    // resolveDvn returns an address fragment, never a name borrowed from another chain.
+    const srcChainKey = getChainRef(w.chainId)?.chainKey ?? null;
     // Per-corridor DVN breakdown: one entry per active route, null when ULN is unreadable.
     const activeRoutes = snap?.routes.filter(r => r.isActive) ?? [];
     const dvnCorridors = activeRoutes.length > 0
@@ -128,6 +153,10 @@ router.get("/status", async (_req: Request, res: Response) => {
     unassessed: real.length - assessed.length,
   };
 
+  // Metadata provenance, mirrored from the PDR. `stale` when we are serving a cached DVN
+  // table because the live fetch failed — verdicts are still real, just computed against
+  // an older ground truth. The hash lets a reader confirm which one.
+  const metaAgeMs = Date.now() - dvnMeta.fetchedAt;
   res.json({
     watched,
     msi,
@@ -135,6 +164,11 @@ router.get("/status", async (_req: Request, res: Response) => {
     registry: process.env.AUDIT_REGISTRY_ADDRESS,
     alertBus: process.env.ALERT_BUS_ADDRESS,
     rulesVersion: RULES_VERSION,
+    dvnMeta: {
+      hash: dvnMetaHash(dvnMeta),
+      fetchedAt: dvnMeta.fetchedAt,
+      stale: metaAgeMs > 24 * 3600_000,
+    },
   });
 });
 

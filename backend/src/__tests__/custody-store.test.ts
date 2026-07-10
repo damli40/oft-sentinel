@@ -77,6 +77,7 @@ describe("assessSnapshot loads declarations from the store when not passed one",
       proxyAdmin: null,
       proxyAdminOwner: null,
       proxyAdminIsMultisig: null,
+    proxyAdminOwnerIsContract: null,
       routes: [],
     };
     const { findings } = await assessSnapshot(snap);

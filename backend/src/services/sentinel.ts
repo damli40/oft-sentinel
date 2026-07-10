@@ -1,11 +1,12 @@
 import type { OftSnapshot, RouteSnapshot, WatchedOft, SentinelVerdict } from "../types.js";
-import { readSnapshot } from "./lz-config.js";
+import { readSnapshot, loadDvnMeta, MetadataUnavailableError } from "./lz-config.js";
+import { sendTelegram } from "./alerts.js";
 import { assessSnapshot } from "./drift.js";
 import { runCheck, produceWeakConfigAttestation } from "./orchestrator.js";
 import { getSnapshot, putSnapshot, appendScoreHistory, hideVerdictsBefore } from "./snapshot-store.js";
-import { getMantleOfts } from "./dune.js";
+import { getMantleOfts, getActiveOftsForChain, activeWatchlistChainKeys } from "./dune.js";
+import { getChainRef, getChainRefByKey } from "./chain-registry.js";
 
-const MANTLE_RPC = process.env.MANTLE_RPC ?? "https://rpc.mantle.xyz";
 const MANTLE_CHAIN_ID = Number(process.env.MANTLE_CHAIN_ID ?? 5000);
 const POLL_CONCURRENCY = 3; // OFTs read in parallel per cycle (bounds RPC load)
 
@@ -17,29 +18,51 @@ const KELP_DEMO_OFT: WatchedOft = {
   chainId: MANTLE_CHAIN_ID,
 };
 
-// Watchlist: all-time OFTs with ≥$1M USD volume from the leaderboard query (7638642).
-// Value-at-risk, not recent activity, decides who we watch — a high-value bridge that
-// has gone quiet is exactly where a config drift goes unnoticed. Low-volume and test
-// contracts are excluded before they reach the polling loop.
+// Mantle watchlist: all-time OFTs with ≥$1M USD volume from the leaderboard query
+// (7638642). Value-at-risk, not recent activity, decides who we watch on Mantle — a
+// high-value bridge that has gone quiet is exactly where a config drift goes unnoticed.
+// Additional EVM chains use the active-OFT rule (10+ msgs / 7-day) instead: on chains
+// with a broad OFT universe, recent activity is the right dormancy/test filter.
 const WATCHLIST_MIN_VOLUME = 1_000_000;
 let watchedCache: { at: number; list: WatchedOft[] } | null = null;
 const WATCHED_TTL = 10 * 60_000;
+const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
 export async function getWatched(force = false): Promise<WatchedOft[]> {
   if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL)
     return [...watchedCache.list, KELP_DEMO_OFT];
-  const ofts = await getMantleOfts(force).catch(() => []);
-  const seen = new Set<string>();
-  const list = ofts
-    .filter((o) => {
-      if (!o.address || !/^0x[0-9a-fA-F]{40}$/.test(o.address)) return false;
-      if (o.usdVolume < WATCHLIST_MIN_VOLUME) return false;
-      const key = o.address.toLowerCase();
-      if (seen.has(key)) return false; // skip duplicate contract addresses (e.g. USDT/USDT0)
-      seen.add(key);
-      return true;
-    })
-    .map((o) => ({ ticker: o.ticker, address: o.address as string, chainId: MANTLE_CHAIN_ID }));
+
+  const seen = new Set<string>(); // dedupe by chainId:address — the same OFT address
+                                  // deploys to the same address on multiple chains, so
+                                  // dedupe must be per-chain, not address-only.
+  const list: WatchedOft[] = [];
+  const add = (ticker: string, address: string, chainId: number) => {
+    const key = `${chainId}:${address.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    list.push({ ticker, address, chainId });
+  };
+
+  // Mantle: all-time leaderboard, ≥$1M volume (behavior unchanged).
+  const mantleOfts = await getMantleOfts(force).catch(() => []);
+  for (const o of mantleOfts) {
+    if (!o.address || !ADDR_RE.test(o.address)) continue;
+    if (o.usdVolume < WATCHLIST_MIN_VOLUME) continue;
+    add(o.ticker, o.address, MANTLE_CHAIN_ID);
+  }
+
+  // Additional EVM chains: active-OFT rule (10+ msgs / 7-day), no volume floor.
+  // Only watch a chain the registry can quorum-read; skip unknown/ineligible silently.
+  for (const chainKey of activeWatchlistChainKeys()) {
+    const ref = getChainRefByKey(chainKey);
+    if (!ref || !ref.eligible) continue;
+    const ofts = await getActiveOftsForChain(chainKey, force).catch(() => []);
+    for (const o of ofts) {
+      if (!o.address || !ADDR_RE.test(o.address)) continue;
+      add(o.ticker, o.address, ref.chainId);
+    }
+  }
+
   if (list.length) watchedCache = { at: Date.now(), list };
   // DEMO is always appended — not in Dune, not polled, used only for replay.
   return [...list, KELP_DEMO_OFT];
@@ -55,6 +78,9 @@ async function mapLimit<T>(items: T[], limit: number, fn: (x: T) => Promise<void
 }
 
 let polling = false;
+// One-shot latch: alert on the transition into a metadata blackout, not once per cycle.
+// Re-armed as soon as a load succeeds, so a second outage alerts again.
+let metadataBlackoutAlerted = false;
 
 /** Poll every watched OFT once: read live config → run the drift check. */
 export async function pollOnce(): Promise<void> {
@@ -64,11 +90,45 @@ export async function pollOnce(): Promise<void> {
   }
   polling = true;
   try {
+    // Preflight the DVN table ONCE per cycle. Without it every asset fails identically in
+    // its own catch, 174 times, as an indistinguishable "poll failed" line — and the fleet
+    // silently stops being monitored while the dashboard keeps showing yesterday's PASS
+    // tiles. A metadata blackout is an incident, not a log line: alert, then skip the
+    // cycle without reading, scoring or attesting anything.
+    try {
+      await loadDvnMeta();
+    } catch (e) {
+      if (e instanceof MetadataUnavailableError) {
+        console.error("[sentinel] DVN metadata unavailable — skipping poll cycle, nothing assessed or attested");
+        if (!metadataBlackoutAlerted) {
+          metadataBlackoutAlerted = true;
+          await sendTelegram(
+            process.env.TELEGRAM_CHAT_ID ?? null,
+            "🚨 <b>Sentinel monitoring STOPPED</b>\nDVN metadata unavailable from the LayerZero API and no cached copy on disk. No configs are being assessed and no verdicts are being attested until this clears.",
+            "metadata-blackout",
+          ).catch((err) => console.error("[sentinel] blackout alert failed:", err?.message));
+        }
+        return;
+      }
+      throw e;
+    }
+    // Recovered: re-arm the one-shot so the next blackout alerts again.
+    metadataBlackoutAlerted = false;
+
     const watched = await getWatched();
-    console.log(`[sentinel] polling ${watched.length} OFTs on Mantle (${MANTLE_CHAIN_ID})`);
+    const chainCount = new Set(watched.filter((w) => w.ticker !== "DEMO").map((w) => w.chainId)).size;
+    console.log(`[sentinel] polling ${watched.length} OFTs across ${chainCount} chain(s)`);
     await mapLimit(watched.filter((w) => w.ticker !== "DEMO"), POLL_CONCURRENCY, async (w) => {
       try {
-        const snap = await readSnapshot(w.address, w.chainId, MANTLE_RPC);
+        // Resolve the OFT's source chain from the registry (MANTLE_RPC override
+        // is applied inside getChainRef). An unknown or ineligible chain is
+        // logged and skipped — never crash the poller over one asset's config.
+        const chainRef = getChainRef(w.chainId);
+        if (!chainRef || !chainRef.eligible) {
+          console.warn(`[sentinel] ${w.ticker}: chain ${w.chainId} not in registry or ineligible — skipping`);
+          return;
+        }
+        const snap = await readSnapshot(w.address, chainRef);
         // Never store or score a snapshot with 0 active routes. Either the peer sweep
         // failed under RPC load (transient) or the OFT genuinely has no peers — in both
         // cases storing it would either wipe a good baseline OR, on a first-ever poll,
@@ -177,6 +237,7 @@ function makeSnapshot(oft: string, chainId: number, requiredDVNCount: number): O
     proxyAdmin: null,
     proxyAdminOwner: null,
     proxyAdminIsMultisig: null,
+    proxyAdminOwnerIsContract: null,
     routes: [route(30101, "ethereum", requiredDVNCount, 15)],
   };
 }
@@ -214,6 +275,7 @@ function makeSnapshotLibRevert(oft: string, chainId: number): OftSnapshot {
     proxyAdmin: null,
     proxyAdminOwner: null,
     proxyAdminIsMultisig: null,
+    proxyAdminOwnerIsContract: null,
     routes: [routeLibRevert(30101, "ethereum")],
   };
 }

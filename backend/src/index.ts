@@ -30,6 +30,18 @@ app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log(`[server] Listening on http://localhost:${PORT}`);
 
-  // The Sentinel runs autonomously — always on.
+  // The Sentinel runs autonomously — always on, unless explicitly disabled.
+  //
+  // SENTINEL_AUTOSTART=false serves the API without the poller. This exists because
+  // pollOnce() is NOT a read-only operation: it calls attest() (real gas from
+  // SENTINEL_PRIVATE_KEY) and dispatchAlert() (public Telegram + on-chain AlertBus), and
+  // its weakAlertFired dedupe is an in-memory Set that resets every process — so booting
+  // the server locally to "just check an endpoint" re-attests and re-alerts the entire
+  // fleet. Opt-out rather than opt-in: prod must never silently stop monitoring because
+  // an env var went missing.
+  if (process.env.SENTINEL_AUTOSTART === "false") {
+    console.log("[server] poller DISABLED (SENTINEL_AUTOSTART=false) — API only, no attestations, no alerts");
+    return;
+  }
   startSentinel();
 });

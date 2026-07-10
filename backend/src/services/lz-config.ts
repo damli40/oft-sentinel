@@ -1,5 +1,9 @@
-import { createPublicClient, http, getAddress, type Address } from "viem";
-import type { OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
+import { createPublicClient, http, getAddress, keccak256, toHex, type Address } from "viem";
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from "fs";
+import { resolve, dirname, join } from "path";
+import { fileURLToPath } from "url";
+import type { ChainRef, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
+import { getChainRefByKey, normalizeProvider } from "./chain-registry.js";
 
 // LayerZero V2 endpoint — same address on every EVM chain.
 const ENDPOINT = "0x1a44076050125825900e736c501f859c50fE728c" as Address;
@@ -22,45 +26,13 @@ const SEL = {
 // RPC URLs for destination-side receive reads are curated; absent = skip mismatch check.
 const DEPLOYMENTS_URL = "https://metadata.layerzero-api.com/v1/metadata/deployments";
 
-// Secondary Mantle RPCs used for source-conflict detection and read fallback.
-// Cross-checking the send-side ULN against an independent provider makes it
-// harder to blind the Sentinel via a compromised or manipulated primary RPC.
-// All verified live 2026-06-10 (1rpc.io/mantle removed — returns
-// "Requested resource not found" on every call).
-const MANTLE_FALLBACK_RPCS = [
-  "https://mantle.drpc.org",
-  "https://mantle-rpc.publicnode.com",
-  "https://rpc.mantle.xyz",
-];
+// Source-chain fallback RPCs and destination-side receive RPCs are no longer
+// hardcoded to Mantle: the reader takes a ChainRef and derives its primary +
+// quorum RPCs from the registry (see readSnapshot). Destination-side receive
+// reads resolve their RPC from the registry too (getChainRefByKey), so coverage
+// is every eligible chain rather than the old 22 curated ones.
 
-// Public RPCs for destination-side receive reads. Only needed for mismatch detection;
-// primary signals (counts/confs/libs/owner) are all Mantle-side reads.
-const CHAIN_RPC: Record<string, string> = {
-  ethereum:    "https://eth.llamarpc.com",
-  arbitrum:    "https://arb1.arbitrum.io/rpc",
-  optimism:    "https://mainnet.optimism.io",
-  base:        "https://mainnet.base.org",
-  polygon:     "https://polygon-rpc.com",
-  avalanche:   "https://api.avax.network/ext/bc/C/rpc",
-  bsc:         "https://bsc-dataseed.binance.org",
-  linea:       "https://rpc.linea.build",
-  scroll:      "https://rpc.scroll.io",
-  fraxtal:     "https://rpc.frax.com",
-  blast:       "https://rpc.blast.io",
-  mode:        "https://mainnet.mode.network",
-  manta:       "https://pacific-rpc.manta.network/http",
-  xlayer:      "https://rpc.xlayer.tech",
-  rootstock:   "https://public-node.rsk.co",
-  ink:         "https://rpc-gel.inkonchain.com",
-  hyperliquid: "https://rpc.hyperliquid.xyz/evm",
-  sei:         "https://evm-rpc.sei-apis.com",
-  zircuit:     "https://zircuit-mainnet.drpc.org",
-  worldchain:  "https://worldchain-mainnet.g.alchemy.com/public",
-  zksync:      "https://mainnet.era.zksync.io",
-  flare:       "https://flare-api.flare.network/ext/C/rpc",
-};
-
-export interface ChainInfo { chainKey: string; endpoint: string; rpc?: string }
+export interface ChainInfo { chainKey: string; endpoint: string }
 
 let eidMapCache: { at: number; map: Record<number, ChainInfo> } | null = null;
 
@@ -82,7 +54,6 @@ export async function loadEidMap(): Promise<Record<number, ChainInfo>> {
         map[eid] = {
           chainKey: dep.chainKey as string,
           endpoint: ep,
-          rpc: CHAIN_RPC[dep.chainKey as string],
         };
       }
     }
@@ -93,54 +64,288 @@ export async function loadEidMap(): Promise<Record<number, ChainInfo>> {
   }
 }
 
-// Source chain (Mantle) EID
-const MANTLE_EID = 30181;
-
 // EIP-1967 TransparentUpgradeableProxy admin slot
 const EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103" as `0x${string}`;
 
 // ── DVN metadata (chainKey-keyed) ─────────────────────────────────────────────
 const DVN_META_URL = "https://metadata.layerzero-api.com/v1/metadata/dvns";
 
-// byChain: chainKey → { addrLower → { name, deprecated } }
-// globalFallback: addrLower → name  (only for addrs with identical name on every chain)
-type DvnMeta = {
-  byChain: Record<string, Record<string, { name: string; deprecated: boolean }>>;
-  globalFallback: Record<string, string>;
+// A DVN's identity is the (chainKey, address) PAIR — never the address alone.
+// The same address is a different verifier on different chains:
+//   0xdd7b5e1d… = "Nethermind" (live) on linea, "BWare" (DEPRECATED) on zkevm
+//   0x3b0531…   = usdt0 on ethereum, nansen on optimism, nethermind on sonic
+//   0xce8358…   = "LZDeadDVN" on neox/bevm, "LayerZero Labs" (LIVE) on mode/skale/hedera
+// 311 of 1052 registry addresses appear on more than one chain; 276 of those carry a
+// different name/id per chain and 113 differ in their `deprecated` flag. So every
+// lookup below takes a chainKey and fails closed without one.
+//
+// byChain:     chainKey → { addrLower → { name, deprecated, id } }
+// deadByChain: chainKey → Set<addrLower> of that chain's LZ Dead DVN placeholders,
+//   sourced from the deployments API's per-chain `deadDVN.address` plus any DVN whose
+//   canonicalName matches "LZDeadDVN" ON THAT CHAIN.
+//
+// deadByChain was a FLAT cross-chain Set. That was wrong and dangerous: 14 addresses are
+// a dead placeholder on one chain and a live DVN on another, so a flat union classifies a
+// genuine 1-of-1 as an unconfigured dead pathway and SUPPRESSES the CRITICAL — the exact
+// Kelp shape the Dead Pathway rule exists to preserve. It must stay per-chain.
+//
+// `globalFallback` (addr → name when the name was identical on every chain) is GONE. A
+// name copied from another chain is an inference, not an observation, and it silently
+// papered over the chainKey-namespace bug fixed in buildDvnKeyMap() below.
+export type DvnEntry = { name: string; deprecated: boolean; id: string | null };
+export type DvnMeta = {
+  byChain: Record<string, Record<string, DvnEntry>>;
+  deadByChain: Record<string, Set<string>>;
+  /** epoch ms of the successful fetch this data came from; 0 for empty metadata. */
+  fetchedAt: number;
 };
 
-let dvnMetaCache: { at: number; data: DvnMeta } | null = null;
+/** Thrown when DVN metadata is unavailable from network AND disk. Callers must not
+ *  assess: a verdict computed against empty metadata silently drops every Deprecated
+ *  DVN finding and turns every real dead pathway into a false CRITICAL. Refusing to
+ *  score is the only safe answer — a security monitor never claims an unread config. */
+export class MetadataUnavailableError extends Error {
+  constructor(cause?: unknown) {
+    super("DVN metadata unavailable: no live fetch, no cached copy on disk");
+    this.name = "MetadataUnavailableError";
+    this.cause = cause;
+  }
+}
 
-export async function loadDvnMeta(): Promise<DvnMeta> {
-  if (dvnMetaCache && Date.now() - dvnMetaCache.at < 24 * 3600_000) return dvnMetaCache.data;
-  try {
-    const res = await fetch(DVN_META_URL);
-    const raw = (await res.json()) as Record<string, { dvns?: Record<string, any> }>;
-    const byChain: Record<string, Record<string, { name: string; deprecated: boolean }>> = {};
-    const allNames: Record<string, Set<string>> = {};
-    for (const [chainKey, chainData] of Object.entries(raw)) {
-      // Key directly by chainKey — same namespace as the deployments API.
-      // No intermediate numeric-chainId mapping (that was the source of wrong names).
-      for (const [addr, info] of Object.entries(chainData.dvns ?? {})) {
-        const name = info.canonicalName ?? info.id ?? addr;
-        const deprecated = !!info.deprecated;
-        const key = addr.toLowerCase();
-        if (!byChain[chainKey]) byChain[chainKey] = {};
-        byChain[chainKey][key] = { name, deprecated };
-        if (!allNames[key]) allNames[key] = new Set();
-        allNames[key].add(name);
+/** Fresh empty metadata. A factory, not a const: `deadByChain` holds mutable Sets and a
+ *  shared instance would let one caller's writes leak into every other caller's view. */
+export const emptyDvnMeta = (): DvnMeta => ({
+  byChain: {},
+  deadByChain: {},
+  fetchedAt: 0,
+});
+
+const DVN_META_TTL_MS = 24 * 3600_000;      // refresh cadence
+const DVN_META_STALE_WARN_MS = 7 * 24 * 3600_000; // loud warning past this age
+const DVN_META_BASENAME = "dvn-metadata.json";
+
+/** Bump whenever DvnMeta's serialized shape changes. Any consumer that pins a frozen
+ *  copy of this structure — notably oft-bench's ground-truth fixture, which IS the
+ *  reward oracle — must fail loudly rather than deserialize a v1 payload into a v2
+ *  reader. A v1 fixture read as v2 leaves `deadByChain` undefined, so isDeadDvn()
+ *  returns false everywhere and every dead pathway silently relabels as a live
+ *  1-of-1 CRITICAL. Silent label drift in a reward oracle is unrecoverable. */
+export const DVN_META_SCHEMA_VERSION = 2;
+
+/** Disk-cache path. Mirrors custody.ts: DATA_DIR on the Railway volume, else backend/data. */
+export function dvnMetaFile(): string {
+  const dataDir = process.env.DATA_DIR
+    ? resolve(process.env.DATA_DIR)
+    : join(dirname(fileURLToPath(import.meta.url)), "..", "..", "data");
+  return join(dataDir, DVN_META_BASENAME);
+}
+
+let dvnMetaCache: DvnMeta | null = null;
+
+// The DVN API and the deployments API DO NOT share a chainKey namespace, despite both
+// living under metadata.layerzero-api.com. For three chains the names differ outright:
+//
+//   deployments top-level key   deployments[].chainKey   DVN API key
+//   ─────────────────────────   ──────────────────────   ───────────
+//   zkconsensys-mainnet         linea                    zkconsensys
+//   zkpolygon-mainnet           zkevm                    zkpolygon
+//   meritcircle-mainnet         beam                     meritcircle
+//
+// `deployments[].chainKey` is the namespace the rest of Sentinel speaks (eids.json and
+// chain-registry.json both use "linea"). The DVN API is keyed by the top-level name.
+// Joining them on eid recovers the mapping at runtime, so an LZ rename self-heals
+// instead of silently blanking a chain's DVN table.
+//
+// Before this, byChain["linea"] was undefined and globalFallback quietly supplied names
+// borrowed from other chains — hiding the gap. Linea's 3 deprecated DVNs (BWare,
+// Stargate, LZDeadDVN) were invisible to isDvnDeprecated(), which fails closed.
+type DeployRec = { chainKey?: string; eid?: string | number; version?: number; stage?: string; deadDVN?: { address?: string } };
+
+/** dvnApiKey → the chainKey used everywhere else in Sentinel. Derived, never hardcoded. */
+function buildDvnKeyMap(dep: Record<string, { deployments?: DeployRec[] }>): {
+  dvnKeyToChainKey: Record<string, string>;
+  deadByChain: Record<string, Set<string>>;
+} {
+  const dvnKeyToChainKey: Record<string, string> = {};
+  const deadByChain: Record<string, Set<string>> = {};
+  for (const [topKey, val] of Object.entries(dep)) {
+    for (const d of val.deployments ?? []) {
+      if (d.version !== 2 || d.stage !== "mainnet") continue;
+      const eid = Number(d.eid);
+      if (!Number.isFinite(eid) || eid < 30000 || eid >= 40000) continue; // V2 EVM mainnet only
+      const chainKey = d.chainKey;
+      if (!chainKey) continue;
+      dvnKeyToChainKey[topKey.replace(/-mainnet$/, "")] = chainKey;
+      const dead = d.deadDVN?.address;
+      if (typeof dead === "string" && dead.startsWith("0x")) {
+        (deadByChain[chainKey] ??= new Set()).add(dead.toLowerCase());
       }
     }
-    const globalFallback: Record<string, string> = {};
-    for (const [addr, names] of Object.entries(allNames)) {
-      if (names.size === 1) globalFallback[addr] = [...names][0];
-    }
-    const data = { byChain, globalFallback };
-    dvnMetaCache = { at: Date.now(), data };
-    return data;
-  } catch {
-    return dvnMetaCache?.data ?? { byChain: {}, globalFallback: {} };
   }
+  return { dvnKeyToChainKey, deadByChain };
+}
+
+async function fetchDvnMeta(): Promise<DvnMeta> {
+  // dvns gives names/deprecation/id; deployments gives the eid↔chainKey join AND the
+  // authoritative per-chain deadDVN address. Dead detection is address-based so a
+  // metadata canonicalName change cannot silently reinstate a false CRITICAL.
+  const [dvnRes, depRes] = await Promise.all([fetch(DVN_META_URL), fetch(DEPLOYMENTS_URL)]);
+  if (!dvnRes.ok || !depRes.ok) throw new Error(`metadata fetch: dvns=${dvnRes.status} deployments=${depRes.status}`);
+  const raw = (await dvnRes.json()) as Record<string, { dvns?: Record<string, any> }>;
+  const dep = (await depRes.json()) as Record<string, { deployments?: DeployRec[] }>;
+
+  const { dvnKeyToChainKey, deadByChain } = buildDvnKeyMap(dep);
+  const byChain: Record<string, Record<string, DvnEntry>> = {};
+  for (const [dvnApiKey, chainData] of Object.entries(raw)) {
+    const chainKey = dvnKeyToChainKey[dvnApiKey];
+    if (!chainKey) continue; // testnet, sandbox, or non-EVM — no V2 EVM mainnet deployment
+    for (const [addr, info] of Object.entries(chainData.dvns ?? {})) {
+      const name = info.canonicalName ?? info.id ?? addr;
+      const key = addr.toLowerCase();
+      (byChain[chainKey] ??= {})[key] = {
+        name,
+        deprecated: !!info.deprecated,
+        id: typeof info.id === "string" ? info.id.toLowerCase() : null,
+      };
+      if (/dead\s*dvn/i.test(name)) (deadByChain[chainKey] ??= new Set()).add(key);
+    }
+  }
+  // A parsed-but-empty table is a silent catastrophe (every deprecation check goes
+  // false, every dead pathway becomes a false CRITICAL). Treat it as a failed fetch.
+  if (Object.keys(byChain).length === 0) throw new Error("DVN metadata parsed to zero chains");
+  return { byChain, deadByChain, fetchedAt: Date.now() };
+}
+
+/** Serialize Sets → arrays. */
+function persistDvnMeta(meta: DvnMeta): void {
+  const file = dvnMetaFile();
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const payload = {
+      schemaVersion: DVN_META_SCHEMA_VERSION,
+      fetchedAt: meta.fetchedAt,
+      byChain: meta.byChain,
+      deadByChain: Object.fromEntries(Object.entries(meta.deadByChain).map(([k, v]) => [k, [...v]])),
+    };
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(payload), "utf8"); // atomic: tmp + rename
+    renameSync(tmp, file);
+  } catch (e) {
+    console.warn(`[dvn-meta] could not persist cache to ${file}: ${(e as Error).message}`);
+  }
+}
+
+function readDvnMetaFromDisk(): DvnMeta | null {
+  try {
+    const raw = JSON.parse(readFileSync(dvnMetaFile(), "utf8")) as {
+      schemaVersion?: number;
+      fetchedAt?: number;
+      byChain?: Record<string, Record<string, DvnEntry>>;
+      deadByChain?: Record<string, string[]>;
+    };
+    // A stale-shape cache is worse than no cache: a v1 payload has no deadByChain, so
+    // every dead pathway would read as a live 1-of-1. Refuse it and let the caller
+    // fail closed instead.
+    if (raw.schemaVersion !== DVN_META_SCHEMA_VERSION) {
+      console.warn(`[dvn-meta] ignoring disk cache: schemaVersion ${raw.schemaVersion} != ${DVN_META_SCHEMA_VERSION}`);
+      return null;
+    }
+    if (!raw.byChain || Object.keys(raw.byChain).length === 0) return null;
+    return {
+      byChain: raw.byChain,
+      deadByChain: Object.fromEntries(Object.entries(raw.deadByChain ?? {}).map(([k, v]) => [k, new Set(v)])),
+      fetchedAt: raw.fetchedAt ?? 0,
+    };
+  } catch {
+    return null; // absent or corrupt — indistinguishable, and both mean "no floor"
+  }
+}
+
+/**
+ * Load DVN metadata, keyed by (chainKey, address).
+ *
+ * Order: fresh in-memory cache → live fetch (persisted to disk) → stale copy from
+ * memory or disk, whatever its age → throw.
+ *
+ * Serving a stale copy beats serving an empty one: DVN deprecation moves on the order
+ * of months, so week-old truth is far closer to reality than a blank table that turns
+ * every Deprecated DVN finding off and every dead pathway into a false CRITICAL.
+ *
+ * @throws {MetadataUnavailableError} when there is no live fetch and no cached copy.
+ */
+export async function loadDvnMeta(): Promise<DvnMeta> {
+  if (dvnMetaCache && Date.now() - dvnMetaCache.fetchedAt < DVN_META_TTL_MS) return dvnMetaCache;
+  try {
+    const fresh = await fetchDvnMeta();
+    dvnMetaCache = fresh;
+    persistDvnMeta(fresh);
+    return fresh;
+  } catch (err) {
+    const stale = dvnMetaCache ?? readDvnMetaFromDisk();
+    if (!stale) throw new MetadataUnavailableError(err);
+    const ageMs = Date.now() - stale.fetchedAt;
+    const ageDays = (ageMs / 86_400_000).toFixed(1);
+    if (ageMs > DVN_META_STALE_WARN_MS) {
+      console.error(`[dvn-meta] STALE: serving DVN metadata ${ageDays}d old — live fetch failed: ${(err as Error).message}`);
+    } else {
+      console.warn(`[dvn-meta] live fetch failed, serving cached copy (${ageDays}d old): ${(err as Error).message}`);
+    }
+    dvnMetaCache = stale;
+    return stale;
+  }
+}
+
+/** Test seam: drop the in-memory cache so the next load re-reads disk / network. */
+export function resetDvnMetaCache(): void {
+  dvnMetaCache = null;
+}
+
+// ── Metadata provenance ───────────────────────────────────────────────────────
+// assessSnapshot() is NOT a pure function of (config, declarations). It has a third,
+// invisible input: this DVN table. Two nodes with different cache ages can read the same
+// config and reach different severities — a DVN deprecated last Tuesday flips a MEDIUM to
+// a CRITICAL. Since we now deliberately serve a stale table rather than an empty one, that
+// third input has to be nameable, or "same config → same verdict" is a claim we cannot
+// honour and the PDR's recomputability guarantee is hollow.
+//
+// So every PDR carries the keccak256 of the exact table that decided it. Anyone can fetch
+// the archived table, hash it, and confirm they are recomputing against the same ground
+// truth we used. A verdict you cannot reproduce is not evidence, it is an assertion.
+//
+// Hash the WHOLE table, not the per-chain slice actually touched: the slice depends on
+// which corridors happened to be active, which would make the hash a function of the
+// config too. One table, one hash, one thing to archive.
+
+/** Deterministic serialization: every key sorted, Sets → sorted arrays. JSON.stringify's
+ *  key order follows insertion order, which follows the API's response order — so an
+ *  upstream reordering with identical content would otherwise change the hash. */
+function canonicalizeDvnMeta(meta: DvnMeta): string {
+  const byChain: Record<string, Record<string, DvnEntry>> = {};
+  for (const chainKey of Object.keys(meta.byChain).sort()) {
+    const addrs = meta.byChain[chainKey];
+    byChain[chainKey] = {};
+    for (const addr of Object.keys(addrs).sort()) {
+      const e = addrs[addr];
+      byChain[chainKey][addr] = { name: e.name, deprecated: e.deprecated, id: e.id }; // fixed field order
+    }
+  }
+  const deadByChain: Record<string, string[]> = {};
+  for (const chainKey of Object.keys(meta.deadByChain).sort()) {
+    deadByChain[chainKey] = [...meta.deadByChain[chainKey]].sort();
+  }
+  return JSON.stringify({ schemaVersion: DVN_META_SCHEMA_VERSION, byChain, deadByChain });
+}
+
+const hashCache = new WeakMap<DvnMeta, `0x${string}`>();
+
+/** keccak256 of the canonical DVN table. Memoized per DvnMeta instance — the table is
+ *  ~1MB and this runs once per assessed asset per cycle. */
+export function dvnMetaHash(meta: DvnMeta): `0x${string}` {
+  const hit = hashCache.get(meta);
+  if (hit) return hit;
+  const h = keccak256(toHex(canonicalizeDvnMeta(meta)));
+  hashCache.set(meta, h);
+  return h;
 }
 
 // Overrides for canonical names returned by the LZ metadata API.
@@ -149,22 +354,96 @@ export async function loadDvnMeta(): Promise<DvnMeta> {
 // listing it is permanently message-blocked. Keep canonical name exactly as-is.
 const FRIENDLY_DVN: Record<string, string> = {};
 
-/** Resolve a DVN address to its canonical name, keyed by the chain's chainKey string.
- *  Falls back to globalFallback (same name on every chain) then address fragment.
- *  chainKey must be the LZ deployments chainKey (e.g. "mantle", "ethereum"), not a numeric ID. */
+/** Resolve a DVN address to its canonical name on ITS OWN chain.
+ *  Unregistered on this chain → an address fragment, never a name borrowed from another
+ *  chain. A DVN name is an observation about a (chain, address) pair or it is nothing.
+ *  chainKey must be the LZ deployments chainKey (e.g. "mantle", "linea"), not a numeric ID. */
 export function resolveDvn(addr: string, chainKey: string | null, meta: DvnMeta): string {
   const key = addr.toLowerCase();
-  const raw = (chainKey && meta.byChain[chainKey]?.[key]?.name)
-    ?? meta.globalFallback[key]
-    ?? null;
+  const raw = (chainKey && meta.byChain[chainKey]?.[key]?.name) ?? null;
   if (!raw) return `${addr.slice(0, 8)}…`;
   return FRIENDLY_DVN[raw] ?? raw;
 }
 
+/** Deprecation is per-chain: 113 addresses are deprecated on one chain and live on
+ *  another. Fails closed — unknown chain or unregistered address is never "deprecated". */
 export function isDvnDeprecated(addr: string, chainKey: string | null, meta: DvnMeta): boolean {
   const key = addr.toLowerCase();
   if (chainKey && meta.byChain[chainKey]?.[key]) return meta.byChain[chainKey][key].deprecated;
   return false;
+}
+
+// ── Dead DVN placeholders ─────────────────────────────────────────────────────
+// A "Dead DVN" is a placeholder that can never attest — no verification will ever
+// match it, so a pathway whose required set is entirely dead is unconfigured and
+// message-blocked (LZ "Default Config D"), NOT a live 1-of-1 (a real, compromisable
+// single verifier: the Kelp pattern). Ref: LZ docs, Dead DVN
+// (v2/concepts/glossary#dead-dvn): "they function as null addresses — no
+// verification will match, and messages will be blocked until the Dead DVN is
+// replaced."
+//
+// ⚠️ LZ deploys a DISTINCT dead-DVN contract per chain (116 across V2 EVM mainnets;
+// base = 0x6498…9703, ethereum = 0x747c…f6ac). None of them is 0x…dEaD. Detection is a
+// union of two ADDRESS-based sources, so a metadata canonicalName change cannot silently
+// reinstate the false CRITICAL this rule exists to prevent:
+//   1. Universal burn/zero addresses — some OApps set these by hand (weETH→Zircuit).
+//   2. `meta.deadByChain[chainKey]` — the deployments API's per-chain `deadDVN.address`,
+//      plus any DVN whose canonicalName matches "LZDeadDVN" ON THAT CHAIN.
+//
+// ⚠️ Source 2 MUST stay per-chain. It was once a flat cross-chain Set, on the theory that
+// "dead addresses are chain-specific LZ placeholders, so a cross-chain union carries no
+// realistic collision risk." The live metadata refutes that: 14 addresses are a dead
+// placeholder on one chain and a REAL, LIVE DVN on another —
+//   0x28b6140e… dead on flare,        "LayerZero Labs" on mantle
+//   0x6788f524… dead on 40 chains,    "LayerZero Labs" on 32 others
+//   0x282b3386… dead on space/humanity, live on 36 incl. unichain, sonic, bera
+// Under the flat union, a genuine 1-of-1 on one of those DVNs is classified as an
+// unconfigured dead pathway and its CRITICAL is SUPPRESSED. That is the Kelp shape,
+// silenced by the very rule written to protect it. Never reintroduce the union.
+const DEAD_DVN_ADDRESSES = new Set<string>([
+  "0x000000000000000000000000000000000000dead",
+  "0x0000000000000000000000000000000000000000",
+]);
+
+/** Fails closed: without a chainKey we cannot tell a placeholder from a live verifier,
+ *  and guessing "dead" would suppress a real CRITICAL. Only universal burn addresses
+ *  are chain-independent. */
+export function isDeadDvn(addr: string, chainKey: string | null, meta: DvnMeta): boolean {
+  const key = addr.toLowerCase();
+  if (DEAD_DVN_ADDRESSES.has(key)) return true;
+  if (!chainKey) return false;
+  return meta.deadByChain?.[chainKey]?.has(key) ?? false;
+}
+
+// ── Self-operated DVNs ────────────────────────────────────────────────────────
+// Curated: OFT ticker → the LZ DVN operator `id`s that the SAME protocol operates.
+//
+// This is an allowlist, not a name match, and the direction matters. `ccip` is
+// Chainlink's DVN: it is self-operated for LINK and a third-party DVN for everyone
+// else. Keying by ticker is what encodes that. A name/substring match cannot.
+//
+// Only add an entry you can source from the LZ DVN metadata registry (the `id` field).
+// An unlisted protocol simply gets no Self-DVN credit — a missing positive signal,
+// never a false one. That asymmetry is the point.
+const SELF_DVN_IDS: Record<string, readonly string[]> = {
+  usdt0: ["usdt0"],
+  usdy: ["ondo"],
+  pyusd: ["paxos"],
+  usdg: ["paxos"],
+  link: ["ccip"],
+};
+
+/** True when `addr` is a DVN operated by the protocol that issues `ticker`, on `chainKey`.
+ *  Identity comes from LZ's published `id` slug, never from the display name.
+ *
+ *  Fails closed: without a chainKey we cannot disambiguate an address that belongs to
+ *  different operators on different chains, so we decline to credit rather than guess. */
+export function isSelfDvn(addr: string, ticker: string | undefined, chainKey: string | null, meta: DvnMeta): boolean {
+  if (!ticker || !chainKey) return false;
+  const ids = SELF_DVN_IDS[ticker.toLowerCase()];
+  if (!ids) return false;
+  const id = meta.byChain[chainKey]?.[addr.toLowerCase()]?.id;
+  return !!id && ids.includes(id);
 }
 
 // ── ABI encoding helpers ──────────────────────────────────────────────────────
@@ -226,7 +505,20 @@ function decodeUlnConfig(raw: string): UlnSnapshot | null {
   return { confirmations, requiredDVNCount, requiredDVNs, optionalDVNCount, optionalDVNThreshold, optionalDVNs };
 }
 
-async function rawCall(client: ReturnType<typeof createPublicClient>, to: Address, data: string): Promise<string> {
+// Minimal structural client interface — satisfied by viem's PublicClient and by
+// test doubles. Lets readSnapshot take an injectable client factory (deps.makeClient)
+// so the reader is unit-testable without live RPCs, while production keeps using viem.
+export interface RpcClient {
+  call(args: { to: Address; data: `0x${string}` }): Promise<{ data?: string }>;
+  getBytecode(args: { address: Address }): Promise<string | undefined>;
+  getStorageAt(args: { address: Address; slot: `0x${string}` }): Promise<string | undefined>;
+}
+
+function defaultMakeClient(url: string): RpcClient {
+  return createPublicClient({ transport: http(url) }) as unknown as RpcClient;
+}
+
+async function rawCall(client: RpcClient, to: Address, data: string): Promise<string> {
   const res = await client.call({ to, data: data as `0x${string}` });
   return res.data ?? "0x";
 }
@@ -299,34 +591,77 @@ async function discoverPeersViaEtherscan(chainId: number, oft: Address): Promise
   return next as Promise<Map<number, string>>;
 }
 
+// ── Corridor cache ────────────────────────────────────────────────────────────
+// Corridor DISCOVERY (Etherscan getLogs or the full peers() sweep) is the
+// expensive part of a read and, unlike the ULN configs themselves, changes
+// rarely. Cache the discovered active-corridor set per (chainId, oft) for
+// CORRIDOR_TTL_MS; on a hit we skip discovery entirely and re-read the ULN
+// configs for exactly the cached EIDs.
+//
+// SECURITY NOTE: this only delays detection of a BRAND-NEW corridor by up to the
+// TTL. Config-attack detection on EXISTING corridors is unaffected — every cycle
+// still reads their ULN afresh (the cache stores only which corridors exist, not
+// their configs). A newly added corridor is picked up within ≤ TTL on the next
+// full-discovery cycle.
+const CORRIDOR_TTL_MS = Number(process.env.CORRIDOR_TTL_MS ?? 60 * 60_000);
+interface CorridorCacheEntry { at: number; eids: number[]; peers: Record<number, string> }
+const corridorCache = new Map<string, CorridorCacheEntry>();
+
+/** Clear the corridor cache (tests + operational reset). */
+export function _resetCorridorCache(): void {
+  corridorCache.clear();
+}
+
+/** Injectable seams so the reader is unit-testable without live RPCs. Production
+ *  passes nothing and gets viem clients + the real Etherscan discovery. */
+export interface ReadSnapshotDeps {
+  makeClient?: (url: string) => RpcClient;
+  discoverPeers?: (chainId: number, oft: Address) => Promise<Map<number, string> | null>;
+  loadEidMap?: typeof loadEidMap;
+  loadDvnMeta?: typeof loadDvnMeta;
+}
+
 // ── Snapshot reader ───────────────────────────────────────────────────────────
 
 /**
  * Read the full ULN config for `oft` on its source chain via direct viem calls.
+ * Chain-agnostic: the source chain is described entirely by the `chain` ChainRef
+ * (eid, chainKey, chainId, etherscanFree, and its ordered RPC set from the
+ * registry). Mantle behaviour is byte-identical for a given RPC set.
  *
- * What's new vs. the old hardcoded-5-chain version:
- *  - Sweeps peers() across ALL 17 known destination EIDs (dynamic route discovery)
- *  - Reads destination-side receive ULN for every active route (mismatch detection)
- *  - Chain-keyed DVN metadata (correct name resolution per chain — same address
- *    can map to a different DVN on a different chain, e.g. Nansen vs. USDT0)
- *  - EIP-1967 proxy admin slot + GnosisSafe detection
+ *  - Primary read client = chain.rpcs[0]; quorum/fallback clients = chain.rpcs[1..]
+ *  - RPC-conflict cross-check uses the first fallback from a DIFFERENT provider
+ *    than the primary; if none exists the check is skipped (never faked)
+ *  - Corridor discovery (Etherscan PeerSet logs → full peers() sweep) with cache
+ *  - Destination-side receive ULN resolved from the registry (every eligible chain)
+ *  - Chain-keyed DVN metadata, EIP-1967 proxy admin slot + GnosisSafe detection
  */
-export async function readSnapshot(oft: string, chainId: number, rpcUrl: string): Promise<OftSnapshot> {
-  const srcClient = createPublicClient({ transport: http(rpcUrl) });
-  // Fallback Mantle RPCs for read resilience. The first one also serves as the
-  // cross-check source for RPC-conflict detection.
-  const fallbackClients = MANTLE_FALLBACK_RPCS.filter((r) => r !== rpcUrl)
-    .map((r) => createPublicClient({ transport: http(r) }));
-  const secondaryClient = fallbackClients[0] ?? null;
+export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnapshotDeps = {}): Promise<OftSnapshot> {
+  const makeClient = deps.makeClient ?? defaultMakeClient;
+  const discoverPeers = deps.discoverPeers ?? discoverPeersViaEtherscan;
+  const eidMapLoader = deps.loadEidMap ?? loadEidMap;
+  const dvnMetaLoader = deps.loadDvnMeta ?? loadDvnMeta;
+
+  const srcClient = makeClient(chain.rpcs[0].url);
+  // Quorum/fallback clients from the registry (replaces the Mantle-only set).
+  const fallbackRpcs = chain.rpcs.slice(1);
+  const fallbackClients = fallbackRpcs.map((r) => makeClient(r.url));
+  // Cross-check source for RPC-conflict detection MUST be a DIFFERENT provider
+  // than the primary — two endpoints from the same provider can't independently
+  // corroborate a config. If every fallback shares the primary's provider, the
+  // rpcConflict cross-check is skipped rather than faked.
+  const primaryProvider = normalizeProvider(chain.rpcs[0].provider);
+  const secondaryIdx = fallbackRpcs.findIndex((r) => normalizeProvider(r.provider) !== primaryProvider);
+  const secondaryClient = secondaryIdx >= 0 ? fallbackClients[secondaryIdx] : null;
   const oftAddr = getAddress(oft) as Address;
 
   // Per-corridor reads retry once on the primary RPC, fall back to the
-  // secondary, then to Etherscan's eth_call proxy. A transient RPC failure
-  // must not surface as "unverifiable" — that used to deduct score and pollute
-  // history (USDT0 read 50/AT_RISK while every corridor was a healthy 3-of-3).
-  // An empty "0x" counts as failure: every selector we call returns data, and
-  // some public RPCs return empty instead of erroring when they drop a call.
-  async function strictCall(client: typeof srcClient, to: Address, data: string): Promise<string> {
+  // secondary, then to Etherscan's eth_call proxy (only where etherscanFree). A
+  // transient RPC failure must not surface as "unverifiable" — that used to
+  // deduct score and pollute history (USDT0 read 50/AT_RISK while every corridor
+  // was a healthy 3-of-3). An empty "0x" counts as failure: every selector we
+  // call returns data, and some public RPCs return empty instead of erroring.
+  async function strictCall(client: RpcClient, to: Address, data: string): Promise<string> {
     const r = await rawCall(client, to, data);
     if (!r || r === "0x") throw new Error("empty result");
     return r;
@@ -343,47 +678,61 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
         return await strictCall(fb, to, data);
       } catch { /* next fallback */ }
     }
-    return etherscanCall(chainId, to, data);
+    // Etherscan is the last resort — but only on chains its free tier serves.
+    // On unsupported chains, don't burn a guaranteed-failing call per cycle.
+    if (chain.etherscanFree) return etherscanCall(chain.chainId, to, data);
+    throw new Error(`all RPCs failed for ${to} on chain ${chain.chainId} (etherscan unavailable)`);
   }
 
-  const [dvnMeta, eidMap] = await Promise.all([loadDvnMeta(), loadEidMap()]);
+  const [dvnMeta, eidMap] = await Promise.all([dvnMetaLoader(), eidMapLoader()]);
 
-  // The source chain's chainKey — used for DVN name resolution of send-side configs.
-  // Must be "mantle" (the LZ chainKey) not "5000" (the EVM chain ID).
-  const srcChainKey = eidMap[MANTLE_EID]?.chainKey ?? "mantle";
+  // The source chain's chainKey — used for DVN name resolution of send-side
+  // configs. Prefer the deployments-API chainKey for this EID; fall back to the
+  // registry's chainKey (they agree for every real chain).
+  const srcChainKey = eidMap[chain.eid]?.chainKey ?? chain.chainKey;
 
   // ── Step 1: discover active corridors ────────────────────────────────────
   // Fast path: one Etherscan getLogs call for PeerSet events yields the exact
   // candidate EID set; each is confirmed with a direct peers() read below.
-  // Falls back to sweeping ALL known V2 EVM EIDs when Etherscan is unset,
-  // errors, or returns nothing — a missed corridor would blind the monitor,
-  // so omission always degrades to the exhaustive path, never to silence.
-  // Batched to 25 concurrent calls — prevents Mantle RPC rate-limiting when
-  // multiple OFTs are polled in parallel (each sweeping 170+ EIDs simultaneously).
+  // Falls back to sweeping ALL known V2 EVM EIDs when Etherscan is unavailable
+  // for this chain, errors, or returns nothing — a missed corridor would blind
+  // the monitor, so omission always degrades to the exhaustive path, never to
+  // silence. Batched to 25 concurrent calls to avoid RPC rate-limiting.
+  // Skipped entirely on a corridor-cache hit (see CORRIDOR_TTL_MS).
   const activeEids: number[] = [];
   const peerAddresses: Record<number, string> = {};
   const EID_BATCH = 25;
 
-  const discovered = await discoverPeersViaEtherscan(chainId, oftAddr).catch(() => null);
-  const allEids = discovered?.size
-    ? [...discovered.keys()].filter((e) => e !== MANTLE_EID && eidMap[e])
-    : Object.keys(eidMap).map(Number).filter((e) => e !== MANTLE_EID);
-  if (discovered?.size) {
-    console.log(`[lz-config] ${oft}: ${allEids.length} candidate corridors via PeerSet logs (skipping full sweep)`);
-  }
-  for (let i = 0; i < allEids.length; i += EID_BATCH) {
-    await Promise.all(
-      allEids.slice(i, i + EID_BATCH).map(async (eid) => {
-        try {
-          const r = await resilientCall(oftAddr, SEL.peers + padU32(eid));
-          if (r && r !== "0x" && BigInt(r) !== 0n) {
-            activeEids.push(eid);
-            // peers() returns bytes32 — last 20 bytes are the peer OFT address
-            peerAddresses[eid] = getAddress("0x" + r.slice(-40));
-          }
-        } catch { /* no peer for this eid */ }
-      })
-    );
+  const cacheKey = `${chain.chainId}:${oftAddr}`;
+  const cached = corridorCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < CORRIDOR_TTL_MS) {
+    for (const e of cached.eids) activeEids.push(e);
+    Object.assign(peerAddresses, cached.peers);
+  } else {
+    const discovered = chain.etherscanFree
+      ? await discoverPeers(chain.chainId, oftAddr).catch(() => null)
+      : null;
+    const allEids = discovered?.size
+      ? [...discovered.keys()].filter((e) => e !== chain.eid && eidMap[e])
+      : Object.keys(eidMap).map(Number).filter((e) => e !== chain.eid);
+    if (discovered?.size) {
+      console.log(`[lz-config] ${oft}: ${allEids.length} candidate corridors via PeerSet logs (skipping full sweep)`);
+    }
+    for (let i = 0; i < allEids.length; i += EID_BATCH) {
+      await Promise.all(
+        allEids.slice(i, i + EID_BATCH).map(async (eid) => {
+          try {
+            const r = await resilientCall(oftAddr, SEL.peers + padU32(eid));
+            if (r && r !== "0x" && BigInt(r) !== 0n) {
+              activeEids.push(eid);
+              // peers() returns bytes32 — last 20 bytes are the peer OFT address
+              peerAddresses[eid] = getAddress("0x" + r.slice(-40));
+            }
+          } catch { /* no peer for this eid */ }
+        })
+      );
+    }
+    corridorCache.set(cacheKey, { at: Date.now(), eids: [...activeEids], peers: { ...peerAddresses } });
   }
 
   // ── Step 2: read send-side ULN for each active route ─────────────────────
@@ -465,20 +814,25 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
       } catch { /* null */ }
 
       // ── Step 3: destination-side receive ULN (for mismatch detection) ────
+      // Destination RPC comes from the registry now (every eligible chain), not
+      // the old 22-entry curated map. Unknown / ineligible destination → skip the
+      // mismatch check (behaviour preserved: no RPC known ⇒ receiveUln stays null).
       const peerAddr = peerAddresses[eid];
-      const dstRpc = chainInfo?.rpc;
+      const dstRpc = chainInfo?.chainKey ? getChainRefByKey(chainInfo.chainKey)?.rpcs[0]?.url : undefined;
       // Use the destination chain's own endpoint address (varies by chain).
       const dstEndpoint = (chainInfo?.endpoint ?? ENDPOINT) as Address;
       if (peerAddr && dstRpc) {
         try {
-          const dstClient = createPublicClient({ transport: http(dstRpc) });
+          const dstClient = makeClient(dstRpc);
           const peerAddrChecked = getAddress(peerAddr) as Address;
+          // Reverse direction: read the peer's receive config for messages coming
+          // FROM this source chain — so the source EID here is chain.eid.
           const [recvLib] = decodeAddressBool(
-            await rawCall(dstClient, dstEndpoint, SEL.getReceiveLibrary + padAddr(peerAddrChecked) + padU32(MANTLE_EID))
+            await rawCall(dstClient, dstEndpoint, SEL.getReceiveLibrary + padAddr(peerAddrChecked) + padU32(chain.eid))
           );
           if (recvLib) {
             route.receiveUln = decodeUlnConfig(
-              await rawCall(dstClient, dstEndpoint, SEL.getConfig + padAddr(peerAddrChecked) + padAddr(recvLib) + padU32(MANTLE_EID) + padU32(2))
+              await rawCall(dstClient, dstEndpoint, SEL.getConfig + padAddr(peerAddrChecked) + padAddr(recvLib) + padU32(chain.eid) + padU32(2))
             );
           }
         } catch { /* receiveUln stays null */ }
@@ -494,6 +848,7 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
   let proxyAdmin: string | null = null;
   let proxyAdminOwner: string | null = null;
   let proxyAdminIsMultisig: boolean | null = null;
+  let proxyAdminOwnerIsContract: boolean | null = null;
 
   try {
     owner = decodeAddr(await rawCall(srcClient, oftAddr, SEL.owner));
@@ -511,6 +866,13 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
       try {
         proxyAdminOwner = decodeAddr(await rawCall(srcClient, proxyAdmin as Address, SEL.owner));
         if (proxyAdminOwner) {
+          // Bytecode first: a failed GnosisSafe probe does NOT make the owner an EOA.
+          // Timelocks, custom multisigs and governance contracts all fail getThreshold()
+          // while being contracts. Read code once and let the rule distinguish them.
+          try {
+            const code = await srcClient.getBytecode({ address: proxyAdminOwner as Address });
+            proxyAdminOwnerIsContract = !!code && code !== "0x";
+          } catch { proxyAdminOwnerIsContract = null; /* unreadable → never scored */ }
           // GnosisSafe detection: getThreshold()
           try {
             const thresh = await rawCall(srcClient, proxyAdminOwner as Address, SEL.getThreshold);
@@ -523,13 +885,14 @@ export async function readSnapshot(oft: string, chainId: number, rpcUrl: string)
 
   return {
     oft: oftAddr,
-    chainId,
+    chainId: chain.chainId,
     capturedAt: Date.now(),
     owner,
     ownerIsContract,
     proxyAdmin,
     proxyAdminOwner,
     proxyAdminIsMultisig,
+    proxyAdminOwnerIsContract,
     routes,
   };
 }

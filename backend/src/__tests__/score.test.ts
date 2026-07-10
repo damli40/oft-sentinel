@@ -4,6 +4,7 @@ import type { Finding } from "../types.js";
 
 const f = (severity: Finding["severity"]): Finding => ({
   severity,
+  evidence: "observed", // scoring is severity-driven; evidence is capped upstream
   check: "test",
   detail: "test detail",
 });
