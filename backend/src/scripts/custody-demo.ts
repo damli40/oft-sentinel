@@ -16,6 +16,7 @@ const DEMO_SNAPSHOT: OftSnapshot = {
   proxyAdmin: null,
   proxyAdminOwner: null,
   proxyAdminIsMultisig: null,
+    proxyAdminOwnerIsContract: null,
   routes: [],
 };
 

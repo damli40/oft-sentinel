@@ -4,8 +4,30 @@ export type RiskLevel = "PASS" | "AT_RISK" | "CRITICAL";
 // as a security finding.
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "PASS" | "UNKNOWN";
 
+/**
+ * How directly the chain supports the risk claim this finding makes.
+ *
+ * Severity is not a property of a configuration — it is a property of a configuration
+ * PLUS the evidence that the risk is real. Sentinel repeatedly shipped false CRITICALs
+ * (EOA-vs-Fireblocks, EOA-vs-timelock, 1-of-1-vs-dead-DVN) by collapsing "the config has
+ * property X" into "the protocol has risk Y", joined by an assumption the chain cannot
+ * verify. `evidence` makes that join explicit and bounds it (see capByEvidence).
+ *
+ *  - observed     — the chain directly shows the risk. No interpretation.
+ *                   e.g. requiredDVNs = [oneRealDVN]; owner address has no bytecode.
+ *  - inferred     — the chain shows a PROXY for the risk, not the risk itself.
+ *  - unverifiable — the fact that determines severity is not on-chain at all.
+ *                   e.g. who custodies an EOA key; a timelock's proposer set.
+ *
+ * ⚠️ Assigned from what the READER measured (snapshot fields), never chosen by a rule
+ * author to reach a desired severity. Rules consume it read-only.
+ */
+export type Evidence = "observed" | "inferred" | "unverifiable";
+
 export interface Finding {
   severity: Severity;
+  // Bounds severity via capByEvidence. CRITICAL/HIGH require "observed".
+  evidence: Evidence;
   check: string;
   detail: string;
   // Custody declaration consumed by the rule (Owner Type). Embedded so the PDR
@@ -74,14 +96,40 @@ export interface OftSnapshot {
   ownerIsContract: boolean | null;
   proxyAdmin: string | null;           // EIP-1967 admin slot (null if not a proxy or slot is zero)
   proxyAdminOwner: string | null;      // who controls upgrades
-  proxyAdminIsMultisig: boolean | null; // true if GnosisSafe detected
+  proxyAdminIsMultisig: boolean | null; // true if GnosisSafe detected (getThreshold() returns > 0)
+  // Does proxyAdminOwner have bytecode? Distinguishes a true EOA (no code — a single
+  // key really can upgrade) from a non-Safe CONTRACT owner (timelock, custom multisig,
+  // governance) that merely fails GnosisSafe detection. Without this the engine reports
+  // every non-Safe contract as "an EOA" — the same over-assertion class as the
+  // Fireblocks/EOA custody false positive. null = bytecode read failed (never scored).
+  proxyAdminOwnerIsContract: boolean | null;
   routes: RouteSnapshot[];
+}
+
+// ── Chain registry ─────────────────────────────────────────────────────────
+// Drives multi-chain scaling: every source chain Sentinel monitors is described
+// by a ChainRef loaded from the committed chain-registry.json (public data only).
+
+/** Cadence tier for a watched OFT — controls poll frequency (see scheduler). */
+export type Tier = "critical" | "standard" | "longtail";
+
+export interface ChainRpc { url: string; provider: string }
+
+export interface ChainRef {
+  chainKey: string;
+  eid: number;
+  chainId: number;
+  eligible: boolean;
+  etherscanFree: boolean;
+  rpcs: ChainRpc[];
 }
 
 export interface WatchedOft {
   ticker: string;
   address: string;
   chainId: number;
+  // Cadence tier; optional so existing fixtures/callers default to "standard".
+  tier?: Tier;
 }
 
 export interface DriftResult {
@@ -125,6 +173,13 @@ export interface PolicyDecisionRecord {
   evaluatedAt: number; // unix ms; matches what was hashed and submitted on-chain
   agentId: number;     // ERC-8004 token ID (SENTINEL_AGENT_ID env)
   rulesVersion: string; // "1.1.0" since custody declarations; attestations made under "1.0.0" stay valid as recorded
+  // Provenance of the DVN metadata table that decided these findings. The rules are
+  // deterministic, but they read this table — a DVN deprecated upstream flips a severity
+  // without any config changing. Recording the hash makes the verdict reproducible against
+  // the exact ground truth it was computed from, rather than against whatever the API
+  // happens to serve today. Added in rulesVersion 3.0.0; absent on earlier PDRs.
+  dvnMetaHash: string;      // keccak256 of the canonical DVN table
+  dvnMetaFetchedAt: number; // unix ms the table was fetched (may predate evaluatedAt when serving a stale cache)
 }
 
 /** A stored Sentinel verdict — the off-chain record mirrored by an on-chain attestation. */

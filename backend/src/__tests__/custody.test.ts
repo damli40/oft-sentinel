@@ -12,6 +12,7 @@ const eoaOwnedSnapshot = (): OftSnapshot => ({
   proxyAdmin: null,
   proxyAdminOwner: null,
   proxyAdminIsMultisig: null,
+    proxyAdminOwnerIsContract: null,
   routes: [],
 });
 
@@ -79,8 +80,4 @@ describe("Owner Type rule with custody declarations", () => {
   });
 });
 
-describe("rules version", () => {
-  it("is 1.1.0 after the custody-attestation change", () => {
-    expect(RULES_VERSION).toBe("1.1.0");
-  });
-});
+// rulesVersion is asserted in evidence.test.ts (single source of truth).

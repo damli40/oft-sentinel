@@ -3,16 +3,26 @@ import { detectDrift, assessSnapshot, RULES_VERSION } from "./drift.js";
 import { verdictHash, attest } from "./attestor.js";
 import { dispatchAlert } from "./alerts.js";
 import { getSnapshot, putSnapshot, recordVerdict } from "./snapshot-store.js";
+import { loadDvnMeta, dvnMetaHash } from "./lz-config.js";
 
-function buildPdr(
+/** Async because the PDR now pins the DVN table that decided the findings. loadDvnMeta()
+ *  is cached in-memory for 24h, so this is a map lookup on every call after the first. */
+async function buildPdr(
   oft: string,
   chainId: number,
   findings: Finding[],
   score: number,
   riskLevel: RiskLevel,
   evaluatedAt: number,
-): PolicyDecisionRecord {
-  return { oft, chainId, findings, score, riskLevel, evaluatedAt, agentId: Number(process.env.SENTINEL_AGENT_ID ?? 1), rulesVersion: RULES_VERSION };
+): Promise<PolicyDecisionRecord> {
+  const meta = await loadDvnMeta();
+  return {
+    oft, chainId, findings, score, riskLevel, evaluatedAt,
+    agentId: Number(process.env.SENTINEL_AGENT_ID ?? 1),
+    rulesVersion: RULES_VERSION,
+    dvnMetaHash: dvnMetaHash(meta),
+    dvnMetaFetchedAt: meta.fetchedAt,
+  };
 }
 
 // Per-boot set: once an OFT's weak-config alert fires this session it won't re-fire
@@ -35,7 +45,7 @@ export async function produceWeakConfigAttestation(
   if (weakAlertFired.has(watched.address)) return;
 
   const reasons = findings.filter(f => f.severity !== "PASS").map(f => f.detail);
-  const pdr = buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
+  const pdr = await buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
   const hash = verdictHash(pdr);
 
   const verdict: SentinelVerdict = {
@@ -89,7 +99,7 @@ export async function produceVerdict(
   const { score, riskLevel, findings, tis } = await assessSnapshot(snapshot, watched.ticker);
   const reasons = driftReasons.length ? driftReasons : findings.map((f) => `${f.check}: ${f.detail}`);
 
-  const pdr = buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
+  const pdr = await buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
   const hash = verdictHash(pdr);
 
   const verdict: SentinelVerdict = {

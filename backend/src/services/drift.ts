@@ -1,11 +1,90 @@
-import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, PreflightResult, CustodyDeclaration } from "../types.js";
+import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, Evidence, PreflightResult, CustodyDeclaration } from "../types.js";
 import { computeScore } from "./score.js";
-import { loadDvnMeta, resolveDvn, isDvnDeprecated } from "./lz-config.js";
+import { loadDvnMeta, resolveDvn, isDvnDeprecated, isDeadDvn, isSelfDvn } from "./lz-config.js";
 import { getCustodyDeclaration } from "./custody.js";
+import { getChainRef } from "./chain-registry.js";
+
+/** The LZ chainKey of the snapshot's OWN chain. DVN names, ids and deprecation are all
+ *  per-chain: the same address is a different operator on different chains. This was
+ *  hardcoded to "mantle", which meant every ethereum/base asset resolved its DVNs
+ *  against Mantle's table. Returns null (→ address fragments, no self-DVN credit,
+ *  no deprecation claim) rather than guess a chain we don't recognize. */
+function chainKeyOf(snap: OftSnapshot): string | null {
+  return getChainRef(snap.chainId)?.chainKey ?? null;
+}
 
 // Bumped 1.0.0 → 1.1.0: Owner Type rule now consumes custody declarations
-// (fireblocks_mpc downgrade). Attestations made under 1.0.0 stay valid as recorded.
-export const RULES_VERSION = "1.1.0";
+// (fireblocks_mpc downgrade).
+// Bumped 1.1.0 → 1.2.0: pathways whose required DVN set is entirely an LZ Dead DVN
+// placeholder are classified as unconfigured/blocked (LOW advisory), not scored as a
+// live 1-of-1 / default-library CRITICAL — an un-wired placeholder is not a security
+// posture the team chose (weETH Base→Zircuit false positive). A real single DVN still
+// fires CRITICAL. Attestations made under earlier versions stay valid as recorded.
+// Bumped 1.3.0 → 2.0.0 (MAJOR): every Finding now carries an `evidence` tag, which
+// changes the Finding schema and therefore the PDR shape and its verdictHash.
+// Attestations made under 1.x hash under the old schema and stay valid as recorded;
+// recomputation of a 1.x verdict must use the 1.x PDR as stored.
+//
+// The evidence law replaces three hand-written severity downgrades (Fireblocks MPC,
+// non-Safe proxy owner, and the general "we can't see custody" problem) with one rule.
+//
+// Bumped 2.0.0 → 2.1.0 (MINOR): no schema change, but finding CONTENT changes, so the
+// PDR hash of a re-assessed snapshot moves.
+//   1. srcChainKey is derived from the snapshot's own chain instead of the hardcoded
+//      "mantle". DVN names, ids and deprecation are per-chain — the same address is a
+//      different operator on different chains — so every non-Mantle asset was resolving
+//      its DVN names against Mantle's table.
+//   2. Self-DVN is identified by a curated ticker → operator-id allowlist rather than a
+//      name substring test (which credited ticker "O" with operating "LayerZero Labs"),
+//      and is therefore `observed` rather than `inferred`.
+//   3. A failed proxyAdmin.owner() read no longer interpolates the string "undefined"
+//      into the finding detail.
+//
+// Bumped 2.1.0 → 3.0.0 (MAJOR): the PDR gains `dvnMetaHash` + `dvnMetaFetchedAt`, so the
+// shape and the verdictHash both change. 2.x attestations hash under the old schema and
+// stay valid as recorded; recomputing a 2.x verdict must use the 2.x PDR as stored.
+//
+// Why the PDR had to grow: assessSnapshot() was never a pure function of
+// (config, declarations). It also reads the LZ DVN metadata table, and a DVN deprecated
+// upstream flips a severity with no config change at all. Now that we deliberately serve a
+// stale table rather than an empty one on an API outage, that third input is a real
+// variable and the determinism invariant ("same config → same verdict") is only honest if
+// the verdict names the table it was computed against.
+//
+// Dead-DVN detection is also now strictly per-chain. `deadAddresses` was a flat
+// cross-chain address union, but 14 addresses are an LZ Dead DVN placeholder on one chain
+// and a live DVN on another (0x28b6140e… is dead on flare and "LayerZero Labs" on mantle).
+// A flat union classifies a genuine 1-of-1 on such a DVN as an unconfigured dead pathway
+// and SUPPRESSES its CRITICAL — the exact Kelp shape this rule exists to preserve. That is
+// a severity change, hence MAJOR: a route that scored LOW/Dead Pathway may now score
+// CRITICAL, correctly.
+export const RULES_VERSION = "3.0.0";
+
+// ── The evidence law ─────────────────────────────────────────────────────────
+// CRITICAL and HIGH require directly observed evidence. An inferred finding caps at
+// MEDIUM; an unverifiable one caps at LOW. This makes a false CRITICAL structurally
+// impossible rather than merely unlikely: a rule cannot assert more than the reader
+// measured. Rules propose (severity, evidence); this function is the only thing that
+// decides the severity that ships.
+const SEVERITY_RANK: Record<Severity, number> = {
+  CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, PASS: 4, UNKNOWN: 5,
+};
+const EVIDENCE_CEILING: Record<Evidence, Severity> = {
+  observed: "CRITICAL",   // no cap
+  inferred: "MEDIUM",
+  unverifiable: "LOW",
+};
+
+/** Clamp a finding's severity to what its evidence can support. Never raises. */
+export function capByEvidence(f: Finding): Finding {
+  const ceiling = EVIDENCE_CEILING[f.evidence];
+  // Lower rank number = more severe. Only weaken, never strengthen; PASS/UNKNOWN
+  // (ranks 4/5) sit below every ceiling and are left untouched.
+  if (SEVERITY_RANK[f.severity] < SEVERITY_RANK[ceiling]) {
+    return { ...f, severity: ceiling };
+  }
+  return f;
+}
 
 function activeRoutes(snap: OftSnapshot): RouteSnapshot[] {
   return snap.routes.filter((r) => r.isActive);
@@ -24,13 +103,20 @@ function routeByEid(snap: OftSnapshot, eid: number): RouteSnapshot | undefined {
 export async function detectDrift(prev: OftSnapshot, next: OftSnapshot): Promise<DriftResult> {
   const reasons: string[] = [];
   const dvnMeta = await loadDvnMeta();
-  const srcChainKey = "mantle";
+  const srcChainKey = chainKeyOf(next);
 
   for (const route of activeRoutes(next)) {
     const before = routeByEid(prev, route.eid);
 
     if (!before) {
       // Newly active route: flag if it starts in a risky state.
+      // Skip unconfigured/dead pathways (required set entirely LZ Dead DVN) — a new
+      // placeholder route is message-blocked, not a live 1-of-1 (see assessSnapshot's
+      // Dead Pathway rule). Attesting it as a new SPOF would be a false alarm.
+      if (route.uln && route.uln.requiredDVNs.length > 0 &&
+          route.uln.requiredDVNs.every((a) => isDeadDvn(a, srcChainKey, dvnMeta))) {
+        continue;
+      }
       if (route.uln) {
         const newEffective = route.uln.requiredDVNCount + (route.uln.optionalDVNThreshold ?? 0);
         if (newEffective <= 1) {
@@ -173,7 +259,7 @@ export async function assessSnapshot(
 
   const dvnMeta = await loadDvnMeta();
   // DVN names are keyed by LZ chainKey string ("mantle"), not numeric chain ID ("5000").
-  const srcChainKey = "mantle";
+  const srcChainKey = chainKeyOf(snap);
 
   // Corridors with no enforced options — collapsed into one LOW finding below.
   const missingEnfOpts: string[] = [];
@@ -187,6 +273,7 @@ export async function assessSnapshot(
     if (route.rpcConflict) {
       const f: Finding = {
         severity: "CRITICAL",
+        evidence: "observed",
         check: "RPC Source Conflict",
         detail: `${route.chainName}: multiple RPC providers disagree on the required DVN configuration: possible node manipulation or data inconsistency.`,
       };
@@ -208,11 +295,32 @@ export async function assessSnapshot(
       // not read as a security downgrade (USDT0 scored 50 from exactly this).
       findings.push({
         severity: "UNKNOWN",
+        evidence: "unverifiable",
         check: "ULN Unreadable",
         detail: `${route.chainName}: ${route.sendLibrary ? "ULN config could not be read" : "send library not configured on endpoint"}. DVN and confirmation settings unverifiable on this corridor (not scored).`,
       });
       continue;
     }
+
+    // ── Dead / unconfigured pathway ──────────────────────────────────────────
+    // A required DVN set consisting entirely of LZ Dead DVN placeholders (0x…dEaD,
+    // zero address, or a metadata-flagged "LZ Dead DVN") can never verify a message:
+    // the pathway is unconfigured and message-blocked (LZ "Default Config D"), not a
+    // live 1-of-1. A dead DVN cannot be compromised to forge messages (the Kelp
+    // pattern) — it cannot attest at all — so scoring this route's 1-of-1 / default
+    // libraries as CRITICAL is a false positive (weETH Base→Zircuit). Emit one visible
+    // LOW advisory and skip this route's remaining rules. A real DVN in the required
+    // set (functional count > 0) is unaffected and still scores normally below.
+    if (uln.requiredDVNs.length > 0 && uln.requiredDVNs.every((a) => isDeadDvn(a, srcChainKey, dvnMeta))) {
+      findings.push({
+        severity: "LOW",
+        evidence: "observed",
+        check: "Dead Pathway",
+        detail: `${route.chainName}: required DVN set is entirely an LZ Dead DVN placeholder — pathway not configured; messages are blocked and cannot be delivered. Not a live route (funds bridged here would be stuck until the OApp sets real DVNs).`,
+      });
+      continue;
+    }
+
     const dstChainKey = route.chainKey; // destination chainKey — for DVN name lookup on dst
 
     // ── DVN count ───────────────────────────────────────────────────────────
@@ -223,6 +331,7 @@ export async function assessSnapshot(
     if (effectiveDvnCount <= 1) {
       const f: Finding = {
         severity: "CRITICAL",
+        evidence: "observed",
         check: "DVN Count",
         detail: `${route.chainName}: 1-of-1 effective DVN (${reqNames || "unresolved"}): single point of failure (Kelp rsETH exploit pattern).`,
       };
@@ -231,6 +340,7 @@ export async function assessSnapshot(
       // scores MEDIUM — pre-flight must predict 84/AT_RISK, not 100/PASS.
       const successor: Finding = {
         severity: "MEDIUM",
+        evidence: "observed",
         check: "DVN Count",
         detail: `${route.chainName}: 2 effective DVNs after fix: minimal redundancy.`,
       };
@@ -247,6 +357,7 @@ export async function assessSnapshot(
     } else if (effectiveDvnCount === 2) {
       const f: Finding = {
         severity: "MEDIUM",
+        evidence: "observed",
         check: "DVN Count",
         detail: `${route.chainName}: 2 effective DVNs (${reqNames}): minimal redundancy.`,
       };
@@ -268,6 +379,7 @@ export async function assessSnapshot(
         const name = resolveDvn(dvnAddr, srcChainKey, dvnMeta);
         const f: Finding = {
           severity: "CRITICAL",
+          evidence: "observed",
           check: "Deprecated DVN",
           detail: `${route.chainName}: required DVN "${name}" is deprecated: messages may halt.`,
         };
@@ -285,20 +397,33 @@ export async function assessSnapshot(
       }
     }
 
-    // ── Self-DVN detection ───────────────────────────────────────────────────
-    // A protocol's own DVN in a 3-of-3+ set is additive security — they verify
-    // on top of 2+ independent checkers. Only flag when effective count is 2,
-    // where it reduces the effective independent verifier count to one.
-    // 1-of-1 self-DVN is already caught as CRITICAL above.
-    if (ticker && effectiveDvnCount === 2) {
-      const tickerLower = ticker.toLowerCase();
+    // ── Self-DVN detection (informational — NOT a deduction) ─────────────────
+    // A protocol running its own DVN is ADDITIVE security: they verify on top of the
+    // independent set, and they are the party with the most to lose from a forged
+    // message. It is a plus, not a flaw, so this finding never deducts score.
+    //
+    // The "only one independent verifier" concern in a 2-of-2 set is a property of the
+    // COUNT, not of who operates the DVN — and it is already scored by the DVN Count
+    // 2-of-2 MEDIUM above. Deducting here too would double-count the same fact and
+    // penalise the protocols doing the extra work.
+    //
+    // Kept as PASS so it still appears in the record (and in the PDR) as a positive
+    // signal a reader can see.
+    //
+    // Identification is a curated ticker → DVN-operator-`id` allowlist (isSelfDvn), NOT
+    // a name match. The previous substring test made ticker "O" match "LayerZero Labs"
+    // and credited the O protocol with operating LayerZero's own DVN. An address that is
+    // in the required set is read from the chain, and the address→operator mapping comes
+    // from LZ's own published registry, so this is `observed`. (Evidence never raises a
+    // PASS regardless; the tag is descriptive here.)
+    if (ticker && effectiveDvnCount >= 2) {
       for (const dvnAddr of uln.requiredDVNs) {
-        const name = resolveDvn(dvnAddr, srcChainKey, dvnMeta).toLowerCase();
-        if (name !== dvnAddr.toLowerCase().slice(0, 8) + "…" && name.includes(tickerLower)) {
+        if (isSelfDvn(dvnAddr, ticker, srcChainKey, dvnMeta)) {
           findings.push({
-            severity: "LOW",
+            severity: "PASS",
+            evidence: "observed",
             check: "Self-DVN",
-            detail: `${route.chainName}: "${resolveDvn(dvnAddr, srcChainKey, dvnMeta)}" is operated by the protocol in a 2-of-2 set: one independent verifier remaining.`,
+            detail: `${route.chainName}: "${resolveDvn(dvnAddr, srcChainKey, dvnMeta)}" is operated by the protocol and sits in the required set: additive verification by the party with the most at stake.`,
           });
           break;
         }
@@ -326,6 +451,7 @@ export async function assessSnapshot(
         if (sendSet.size !== recvSet.size || [...sendSet].some((n) => !recvSet.has(n))) {
           const f: Finding = {
             severity: "HIGH",
+            evidence: "observed",
             check: "DVN Mismatch",
             detail: `${route.chainName}: send DVNs [${sendNames.join(", ")}] != receive DVNs [${recvNames.join(", ")}]. Messages will be permanently blocked.`,
           };
@@ -346,6 +472,7 @@ export async function assessSnapshot(
     if (uln.confirmations > 0 && uln.confirmations < 15) {
       const f: Finding = {
         severity: "MEDIUM",
+        evidence: "observed",
         check: "Confirmations",
         detail: `${route.chainName}: ${uln.confirmations} block confirmations (< 15, reorg risk).`,
       };
@@ -374,6 +501,7 @@ export async function assessSnapshot(
     if (route.sendLibIsDefault === true) {
       const f: Finding = {
         severity: "HIGH",
+        evidence: "observed",
         check: "Send Library Pinning",
         detail: `${route.chainName}: send library is the upgradeable default. LZ Labs OneSig can redirect outbound verification unilaterally.`,
       };
@@ -395,6 +523,7 @@ export async function assessSnapshot(
     if (route.receiveLibIsDefault === true) {
       const f: Finding = {
         severity: "CRITICAL",
+        evidence: "observed",
         check: "Receive Library",
         detail: `${route.chainName}: receive library is the upgradeable default. LZ Labs can change inbound message acceptance rules unilaterally, bypassing DVN config.`,
       };
@@ -415,6 +544,7 @@ export async function assessSnapshot(
     if (route.uln && route.receiveUln && route.receiveUln.confirmations > route.uln.confirmations) {
       const f: Finding = {
         severity: "HIGH",
+        evidence: "observed",
         check: "Confirmation Mismatch",
         detail: `${route.chainName}: send confirmations (${route.uln.confirmations}) < receive required (${route.receiveUln.confirmations}). Messages will be permanently blocked.`,
       };
@@ -434,6 +564,7 @@ export async function assessSnapshot(
   if (missingEnfOpts.length > 0) {
     const f: Finding = {
       severity: "LOW",
+      evidence: "observed",
       check: "Enforced Options",
       detail: `No enforced options set on ${missingEnfOpts.length} corridor${missingEnfOpts.length > 1 ? "s" : ""} (${missingEnfOpts.join(", ")}): zero-gas messages can permanently stick channel nonces.`,
     };
@@ -456,25 +587,27 @@ export async function assessSnapshot(
   //   safe_multisig  → HIGH + mismatch note (a real Safe is a contract, not an EOA)
   //   eoa_hot / unknown / none → HIGH, unchanged
   if (snap.ownerIsContract === false) {
-    if (custodyDecl?.custodyType === "fireblocks_mpc") {
-      findings.push({
-        severity: "LOW",
-        check: "Owner Type",
-        detail: "owner is EOA on-chain; declared Fireblocks MPC custody (declared, unverified).",
-        custodyDeclaration: custodyDecl,
-      });
-      // Advisory only — no ownership-transfer remediation demanded for declared MPC.
-    } else {
-      const mismatch = custodyDecl?.custodyType === "safe_multisig";
-      const f: Finding = {
-        severity: "HIGH",
-        check: "Owner Type",
-        detail: mismatch
+    // The chain observes: the owner address has no bytecode. What it CANNOT observe is
+    // who holds the key. A declared MPC custodian (Fireblocks) makes the "single private
+    // key" claim unverifiable, so the law caps it at LOW — no hand-written downgrade.
+    // A declared Safe is contradicted by chain state (a Safe has bytecode), so that
+    // claim stays observed, and stays HIGH.
+    const mpcDeclared = custodyDecl?.custodyType === "fireblocks_mpc";
+    const mismatch = custodyDecl?.custodyType === "safe_multisig";
+    const f: Finding = {
+      severity: "HIGH",
+      evidence: mpcDeclared ? "unverifiable" : "observed",
+      check: "Owner Type",
+      detail: mpcDeclared
+        ? "owner is EOA on-chain; declared Fireblocks MPC custody (declared, unverified)."
+        : mismatch
           ? "OFT owner is an EOA: config can be changed by a single private key. Note: declared Safe multisig custody contradicts chain state (a Safe is a contract, not an EOA)."
           : "OFT owner is an EOA: config can be changed by a single private key.",
-        ...(custodyDecl ? { custodyDeclaration: custodyDecl } : {}),
-      };
-      findings.push(f);
+      ...(custodyDecl ? { custodyDeclaration: custodyDecl } : {}),
+    };
+    findings.push(f);
+    // No ownership-transfer remediation demanded for declared MPC (advisory only).
+    if (!mpcDeclared) {
       addTIS("transfer_ownership_to_multisig", null, {
         intent: "transfer_ownership_to_multisig",
         action: "Transfer OFT ownership to a multisig (e.g. Gnosis Safe)",
@@ -487,25 +620,54 @@ export async function assessSnapshot(
   }
 
   // ── Proxy upgrade path ───────────────────────────────────────────────────
-  if (snap.proxyAdmin !== null) {
-    if (snap.proxyAdminIsMultisig === false) {
+  // A failed GnosisSafe probe (getThreshold() reverts) does NOT mean the owner is an
+  // EOA — timelocks, custom multisigs and governance contracts all revert it while
+  // being contracts. Claiming "EOA" on those is an over-assertion of the same class as
+  // the Fireblocks/EOA custody false positive: on-chain data cannot see governance.
+  // Branch on bytecode, and only say "EOA" when the owner genuinely has none.
+  // `proxyAdminOwner` is null when the ProxyAdmin's owner() read itself failed. Never
+  // interpolate the raw value: `undefined.slice()` short-circuits to the string
+  // "undefined" and ships "Proxy admin owner (undefined...)" into the PDR.
+  const owner10 = snap.proxyAdminOwner ? `${snap.proxyAdminOwner.slice(0, 10)}...` : "owner() unreadable";
+  if (snap.proxyAdmin !== null && snap.proxyAdminIsMultisig !== true) {
+    if (snap.proxyAdminOwnerIsContract === false) {
+      // Genuine EOA: no bytecode. A single private key really can upgrade.
       const f: Finding = {
         severity: "HIGH",
+        evidence: "observed",
         check: "Proxy Upgrade Control",
-        detail: `Proxy admin owner is an EOA (${snap.proxyAdminOwner?.slice(0, 10)}...): a single key can upgrade the implementation.`,
+        detail: `Proxy admin owner is an EOA (${owner10}): a single key can upgrade the implementation.`,
       };
       findings.push(f);
       addTIS("transfer_proxy_admin_to_multisig", null, {
         intent: "transfer_proxy_admin_to_multisig",
         action: "Transfer proxy admin control to a multisig",
-        currentState: `EOA proxy admin (${snap.proxyAdminOwner?.slice(0, 10)}…)`,
+        currentState: `EOA proxy admin (${owner10})`,
         targetState: "Multisig-controlled proxy upgrade path",
         reason: "EOA proxy admin means a single key can upgrade the OFT implementation",
         severity: "HIGH",
       }, f);
+    } else if (snap.proxyAdminOwnerIsContract === true) {
+      // Contract owner that isn't a recognized Safe (e.g. OZ TimelockController).
+      // Strictly better than an EOA. Its governance (proposer set, delay) is not on
+      // chain-readable, so the claim is unverifiable and the law caps it at LOW.
+      findings.push({
+        severity: "HIGH",
+        evidence: "unverifiable",
+        check: "Proxy Upgrade Control",
+        detail: `Proxy admin owner (${owner10}) is a contract but not a recognized Gnosis Safe (e.g. a timelock or custom multisig). Upgrade governance is not verifiable on-chain (unverified).`,
+      });
+    } else {
+      // Bytecode unreadable — never score an unevaluated check (mirrors ULN Unreadable).
+      findings.push({
+        severity: "UNKNOWN",
+        evidence: "unverifiable",
+        check: "Proxy Upgrade Control",
+        detail: `Proxy admin owner (${owner10}) bytecode could not be read: upgrade control unverifiable on this snapshot (not scored).`,
+      });
     }
-    // Multisig-controlled proxy is the recommended configuration — no deduction.
   }
+  // Multisig-controlled proxy is the recommended configuration — no deduction.
 
   // If every active corridor was unreadable, the posture is unverified — surface
   // one MEDIUM so the OFT reads AT_RISK rather than a false 100/PASS.
@@ -513,9 +675,19 @@ export async function assessSnapshot(
   if (active.length > 0 && active.every((r) => !r.uln)) {
     findings.push({
       severity: "MEDIUM",
+      evidence: "observed",
       check: "Coverage",
       detail: "All corridors unreadable after retries: security posture cannot be verified.",
     });
+  }
+
+  // ── Enforce the evidence law ─────────────────────────────────────────────
+  // Single choke point: no rule above can ship a severity its evidence doesn't
+  // support. Mutated in place (not mapped to new objects) because the pre-flight
+  // simulation below matches findings by object identity.
+  for (const f of findings) {
+    const capped = capByEvidence(f);
+    if (capped.severity !== f.severity) f.severity = capped.severity;
   }
 
   const riskLevel = deriveRiskLevel(findings);
