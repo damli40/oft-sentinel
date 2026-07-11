@@ -68,6 +68,23 @@ export interface UlnSnapshot {
   optionalDVNs: string[];
 }
 
+/**
+ * Can value actually move through this corridor right now?
+ *
+ * Teams pre-wire destination chains long before they open them, so a corridor can carry
+ * a fully-formed config that no message has ever traversed. A security claim about money
+ * that cannot move is not a security claim. Liveness bounds what the rules may assert
+ * (see capByLiveness) and licenses the send-side upper-bound inference (see effectiveDvns).
+ *
+ *  - LIVE     — quoteSend() returned a fee. The endpoint priced a real message: the
+ *               corridor is wired end-to-end and will deliver.
+ *  - DORMANT  — quoteSend() reverted. Pre-wired or misconfigured; nothing can be sent.
+ *  - UNKNOWN  — the probe itself failed (RPC error, no peer to quote against). NOT a
+ *               liveness verdict. Never caps severity: an infra hiccup must not be able
+ *               to suppress a real CRITICAL.
+ */
+export type Liveness = "LIVE" | "DORMANT" | "UNKNOWN";
+
 /** One destination route's config as seen from the watched OFT's source chain. */
 export interface RouteSnapshot {
   eid: number;
@@ -85,6 +102,8 @@ export interface RouteSnapshot {
   hasEnforcedOptions: boolean | null; // true if setEnforcedOptions was called for this eid
   isActive: boolean;
   rpcConflict?: boolean; // true if a secondary RPC returned different DVN config for this route
+  // Whether a message can actually be sent through this corridor (quoteSend probe).
+  liveness?: Liveness;
 }
 
 /** Full point-in-time config snapshot for a watched OFT. */

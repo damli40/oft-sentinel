@@ -1,8 +1,8 @@
-import { createPublicClient, http, getAddress, keccak256, toHex, type Address } from "viem";
+import { createPublicClient, http, getAddress, keccak256, toHex, encodeFunctionData, concatHex, pad, type Address } from "viem";
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
-import type { ChainRef, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
+import type { ChainRef, Liveness, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
 import { getChainRefByKey, normalizeProvider } from "./chain-registry.js";
 
 // LayerZero V2 endpoint — same address on every EVM chain.
@@ -18,7 +18,136 @@ const SEL = {
   owner:               "0x8da5cb5b", // () → address
   getThreshold:        "0xe75235b8", // GnosisSafe: () → uint256
   enforcedOptions:     "0x5535d461", // OAppOptionsType3 public mapping getter (uint32,uint16) → bytes — getEnforcedOptions 0x9ca12263 is not a real OFT function (reverts on every standard OFT)
+  decimals:            "0x313ce567", // () → uint8
 } as const;
+
+// ── Liveness probe (quoteSend) ───────────────────────────────────────────────
+// The ONLY bridgeability signal that survived on-chain verification. outboundNonce does
+// NOT work and must not be resurrected: a bricked corridor (weETH→Zircuit) reads nonce 2
+// while a live one (weETH→Ethereum) reads nonce 0.
+//
+// quoteSend() asks the endpoint to price a real message against the live send library,
+// ULN config and peer. It can only return a fee if the corridor is wired end to end, so
+// a successful quote is proof that value can move; a revert is the chain refusing to
+// price the message.
+const QUOTE_SEND_ABI = [{
+  name: "quoteSend",
+  type: "function",
+  stateMutability: "view",
+  inputs: [
+    { name: "_sendParam", type: "tuple", components: [
+      { name: "dstEid", type: "uint32" },
+      { name: "to", type: "bytes32" },
+      { name: "amountLD", type: "uint256" },
+      { name: "minAmountLD", type: "uint256" },
+      { name: "extraOptions", type: "bytes" },
+      { name: "composeMsg", type: "bytes" },
+      { name: "oftCmd", type: "bytes" },
+    ] },
+    { name: "_payInLzToken", type: "bool" },
+  ],
+  outputs: [{ name: "msgFee", type: "tuple", components: [
+    { name: "nativeFee", type: "uint256" },
+    { name: "lzTokenFee", type: "uint256" },
+  ] }],
+}] as const;
+
+// Type-3 options carrying an explicit lzReceive gas floor. Passed on every probe so the
+// quote does NOT depend on the OFT having called setEnforcedOptions() — without this,
+// every OFT missing enforced options would quote-revert and read as a false DORMANT,
+// silently capping the severity of the very assets most likely to be misconfigured.
+const LZ_RECEIVE_OPTION = concatHex([
+  "0x0003",                            // options type 3
+  "0x01",                              // worker id 1 = executor
+  "0x0011",                            // option length: 17 bytes (1 type + 16 gas)
+  "0x01",                              // option type 1 = lzReceive
+  pad(toHex(200_000n), { size: 16 }),  // gas, uint128
+]);
+
+/** A revert is the chain's verdict ("cannot send"); anything else is our own failure to
+ *  ask. Only a clear revert may return DORMANT — a transport error, rate limit or
+ *  timeout must fall through to UNKNOWN, which never caps severity. When in doubt we
+ *  say UNKNOWN: a misread here suppresses a CRITICAL, so the bias must be toward
+ *  "we don't know" rather than "nothing can move". */
+function isRevert(e: any): boolean {
+  const s = `${e?.name ?? ""} ${e?.shortMessage ?? ""} ${e?.details ?? ""} ${e?.message ?? ""}`.toLowerCase();
+  if (/timeout|timed out|fetch failed|socket|econn|network|rate limit|too many requests|429|50[0234]/.test(s)) {
+    return false;
+  }
+  return /revert|invalid opcode|out of gas|contractfunction/.test(s);
+}
+
+// ── Liveness cache: sticky LIVE, never sticky DORMANT ────────────────────────
+// The probe costs one eth_call per corridor per cycle — ~3.5k extra calls across the
+// fleet every 5 minutes, which is real money against an RPC budget.
+//
+// The asymmetry that makes caching safe: caching LIVE can only ever cause us to NOT cap a
+// severity, which is the harmless direction (we never suppress a finding). Caching DORMANT
+// could hold a cap in place after a corridor opens, silently muting a CRITICAL on a route
+// that now moves value — the one failure this whole design exists to prevent.
+//
+// So: LIVE is remembered for 24h, DORMANT and UNKNOWN are re-probed every single cycle.
+// Most corridors are live, so nearly all the cost is amortized away, and the promise that
+// "the cap lifts the day the corridor goes live" is honoured on the very next poll.
+const LIVENESS_TTL = 24 * 60 * 60_000;
+const livenessCache = new Map<string, number>(); // key → time LIVE was observed
+
+export function _resetLivenessCache(): void {
+  livenessCache.clear();
+}
+
+/** Can a message actually be sent through this corridor right now? */
+async function probeLiveness(
+  clients: RpcClient[],
+  oft: Address,
+  dstEid: number,
+  peerAddress: string | null,
+  amountLD: bigint,
+  chainId: number,
+): Promise<Liveness> {
+  // No peer = nothing to send to. This is a config fact, not a probe failure.
+  if (!peerAddress) return "DORMANT";
+
+  const cacheKey = `${chainId}:${oft.toLowerCase()}:${dstEid}`;
+  const seenLiveAt = livenessCache.get(cacheKey);
+  if (seenLiveAt && Date.now() - seenLiveAt < LIVENESS_TTL) return "LIVE";
+
+  let data: `0x${string}`;
+  try {
+    data = encodeFunctionData({
+      abi: QUOTE_SEND_ABI,
+      functionName: "quoteSend",
+      args: [{
+        dstEid,
+        to: pad(getAddress(peerAddress), { size: 32 }),
+        amountLD,
+        minAmountLD: 0n,
+        extraOptions: LZ_RECEIVE_OPTION,
+        composeMsg: "0x",
+        oftCmd: "0x",
+      }, false],
+    });
+  } catch {
+    return "UNKNOWN"; // bad peer address — we cannot even form the question
+  }
+
+  let sawRevert = false;
+  for (const client of clients) {
+    try {
+      const res = await rawCall(client, oft, data);
+      if (res && res !== "0x") {
+        livenessCache.set(cacheKey, Date.now());
+        return "LIVE";
+      }
+      // Empty return from a `view` that always returns data = this RPC misbehaving,
+      // not a verdict. Try the next one.
+    } catch (e) {
+      if (isRevert(e)) { sawRevert = true; break; } // the chain answered — stop asking
+      // transport failure: try the next RPC
+    }
+  }
+  return sawRevert ? "DORMANT" : "UNKNOWN"; // deliberately not cached — see above
+}
 
 // ── Deployments-sourced EID map ───────────────────────────────────────────────
 // Loaded dynamically from the authoritative LZ deployments API.
@@ -738,6 +867,18 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   // ── Step 2: read send-side ULN for each active route ─────────────────────
   const routes: RouteSnapshot[] = [];
 
+  // Probe amount for quoteSend: one whole token, so it always clears the OFT's dust
+  // threshold (amounts below the shared-decimal conversion rate round to zero and can
+  // trip a slippage revert, which would read as a false DORMANT). Read once per OFT.
+  let probeAmount = 10n ** 18n;
+  try {
+    const d = await resilientCall(oftAddr, SEL.decimals);
+    const dec = BigInt(d);
+    if (dec > 0n && dec <= 36n) probeAmount = 10n ** dec;
+  } catch { /* keep the 18-decimal default */ }
+
+  const liveClients = [srcClient, ...fallbackClients];
+
   await Promise.all(
     activeEids.map(async (eid) => {
       const chainInfo = eidMap[eid];
@@ -837,6 +978,12 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
           }
         } catch { /* receiveUln stays null */ }
       }
+
+      // ── Step 3b: liveness ────────────────────────────────────────────────
+      // Can value actually move through this corridor? Teams pre-wire chains long
+      // before they open them, and a config on a corridor nothing can traverse is not
+      // a security posture anyone chose. Bounds what the rules may assert downstream.
+      route.liveness = await probeLiveness(liveClients, oftAddr, eid, peerAddr ?? null, probeAmount, chain.chainId);
 
       routes.push(route);
     })

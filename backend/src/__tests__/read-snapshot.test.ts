@@ -243,6 +243,10 @@ describe("readSnapshot — registry-driven clients", () => {
           peerAddress: getAddress(PEER),
           hasEnforcedOptions: false,
           isActive: true,
+          // The stub client answers the config selectors but not quoteSend, so the
+          // liveness probe cannot reach a verdict. UNKNOWN — never DORMANT — is the
+          // correct read of "we failed to ask", and it caps nothing.
+          liveness: "UNKNOWN",
         },
       ],
     });

@@ -48,6 +48,12 @@ await mapLimit(watched, CONCURRENCY, async (w) => {
       return void skip({ ...w, reason: "all ULN reads null" });
 
     const { score, riskLevel, findings } = await assessSnapshot(snap, w.ticker);
+    const active = snap.routes.filter((r) => r.isActive);
+    // Liveness census. Without this we cannot tell a working severity gate from an inert
+    // one: if RPC pressure turned every corridor into UNKNOWN, the gate would silently
+    // cap nothing and the scan would look identical to a healthy run.
+    const liveness = { LIVE: 0, DORMANT: 0, UNKNOWN: 0 } as Record<string, number>;
+    for (const r of active) liveness[r.liveness ?? "UNKNOWN"]++;
     const row = {
       ticker: w.ticker,
       address: w.address,
@@ -55,7 +61,8 @@ await mapLimit(watched, CONCURRENCY, async (w) => {
       chainKey: chainRef.chainKey,
       score,
       riskLevel,
-      activeRoutes: snap.routes.filter((r) => r.isActive).length,
+      liveness,
+      activeRoutes: active.length,
       findings: findings.map((f) => ({
         severity: f.severity,
         evidence: f.evidence,
