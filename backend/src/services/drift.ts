@@ -1,4 +1,4 @@
-import type { OftSnapshot, RouteSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, Evidence, PreflightResult, CustodyDeclaration } from "../types.js";
+import type { OftSnapshot, RouteSnapshot, UlnSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, Evidence, Liveness, PreflightResult, CustodyDeclaration } from "../types.js";
 import { computeScore } from "./score.js";
 import { loadDvnMeta, resolveDvn, isDvnDeprecated, isDeadDvn, isSelfDvn } from "./lz-config.js";
 import { getCustodyDeclaration } from "./custody.js";
@@ -58,7 +58,42 @@ function chainKeyOf(snap: OftSnapshot): string | null {
 // and SUPPRESSES its CRITICAL — the exact Kelp shape this rule exists to preserve. That is
 // a severity change, hence MAJOR: a route that scored LOW/Dead Pathway may now score
 // CRITICAL, correctly.
-export const RULES_VERSION = "3.0.0";
+//
+// Bumped 3.0.0 → 4.0.0 (MAJOR): the PDR shape is unchanged, but severities move on real
+// assets in both directions, which by the precedent above is a MAJOR change. Three fixes,
+// all forced by taking a corridor the engine called "permanently blocked" and verifying it
+// on-chain, where it turned out to be live, delivering, and healthy:
+//
+//   1. SECURITY IS SCORED ON THE RECEIVE SIDE. The DVN Count rule read `uln` — the SEND
+//      config — but the sender only decides who gets PAID to verify. The receiver decides
+//      who must ATTEST for a message to be accepted, and that quorum is the only thing an
+//      attacker has to defeat. An OFT can pay three DVNs on the source chain and score
+//      clean while accepting on one at the destination — so an OFT whose RECEIVE side is
+//      1-of-1 would have scored PASS. That is a MISSED Kelp, the inverse of the false
+//      positive that started this, and the more dangerous of the two. Sentinel now scores
+//      the enforcement boundary.
+//
+//   2. DVN MISMATCH IS A DELIVERABILITY TEST, NOT A SECURITY TEST — and it is a SUBSET
+//      test, not an equality test. Delivery needs the sender to pay for everything the
+//      receiver requires; paying for MORE is legal and common (LZ's documented
+//      "non-blocking mismatch"). The old rule demanded the two sets be equal and declared
+//      every difference a permanent block. In practice the difference is usually the
+//      receiver's OPTIONAL set, which the old comparison ignored entirely — so the two
+//      sides were identical in identity space and nothing was ever blocked. A genuine
+//      block (receiver requires a DVN the sender does not pay) still fires HIGH.
+//
+//   3. LIVENESS BOUNDS EVERY CLAIM. Teams pre-wire destination chains months before they
+//      open them, so a corridor can carry a full config no message has ever crossed. A
+//      CRITICAL about money that cannot move is noise. quoteSend() now gates severity
+//      (see capByLiveness). A DORMANT corridor caps at MEDIUM and pops to its true
+//      severity the day it goes live; UNKNOWN never caps, so an RPC failure can never
+//      suppress a real finding.
+//
+// The through-line, and the same lesson as the evidence law: the engine was asserting a
+// risk it had not measured. It measured the send side and claimed the receive side; it
+// measured a set difference and claimed a permanent block; it measured a config and
+// claimed value was at risk without checking that value could move at all.
+export const RULES_VERSION = "4.0.0";
 
 // ── The evidence law ─────────────────────────────────────────────────────────
 // CRITICAL and HIGH require directly observed evidence. An inferred finding caps at
@@ -84,6 +119,96 @@ export function capByEvidence(f: Finding): Finding {
     return { ...f, severity: ceiling };
   }
   return f;
+}
+
+// ── The liveness law ─────────────────────────────────────────────────────────
+// A security claim about money that cannot move is not a security claim. Teams pre-wire
+// destination chains long before they open them, so a corridor can carry a fully-formed
+// config that no message has ever traversed — and a CRITICAL on it is noise that costs
+// exactly as much credibility as a false one.
+//
+// DORMANT therefore caps route findings at MEDIUM: still recorded, still in the digest,
+// never paged. The cap is not suppression — it lifts by itself the day quoteSend starts
+// succeeding, so a dangerous pre-wired corridor pops to its true severity the moment it
+// opens, which is the moment it starts mattering.
+//
+// UNKNOWN must NEVER cap. UNKNOWN means the probe failed, not that the corridor is dead;
+// letting an RPC hiccup downgrade a CRITICAL would turn Sentinel into a machine for
+// suppressing findings under load — a worse failure than the one it replaces.
+const LIVENESS_CEILING: Record<Liveness, Severity> = {
+  LIVE: "CRITICAL",     // no cap
+  DORMANT: "MEDIUM",    // nothing can move through it
+  UNKNOWN: "CRITICAL",  // we failed to ask — never hold that against the finding
+};
+
+/** Clamp a route finding's severity to what its corridor's liveness can support. */
+export function capByLiveness(f: Finding, liveness: Liveness): Finding {
+  const ceiling = LIVENESS_CEILING[liveness];
+  if (SEVERITY_RANK[f.severity] < SEVERITY_RANK[ceiling]) {
+    return { ...f, severity: ceiling };
+  }
+  return f;
+}
+
+/** How many distinct verifiers must attest before this side accepts a message.
+ *  Required DVNs must ALL sign; `optionalDVNThreshold` of the optional set must also
+ *  sign. Forging a message means defeating every one of them. */
+export function effectiveDvns(uln: UlnSnapshot): number {
+  return uln.requiredDVNCount + (uln.optionalDVNThreshold ?? 0);
+}
+
+export interface Deliverability {
+  /** True = no message can be delivered. The receiver demands a verifier the sender
+   *  does not pay, so the quorum can never be met. This is a real permanent block. */
+  blocked: boolean;
+  /** Receiver-required verifiers the sender does not pay for. */
+  missingRequired: string[];
+  /** How far short the sender falls of the receiver's optional-DVN threshold. */
+  optionalShortfall: number;
+  /** Verifiers the sender pays for that the receiver neither requires nor counts. Safe —
+   *  they cannot block or weaken anything — but not free: every DVN in the send config is
+   *  paid on every message, so these are burning fees on attestations nobody reads. */
+  overpaid: string[];
+}
+
+/**
+ * Can a message verified under the SEND config satisfy the RECEIVE config?
+ *
+ * This is a SUBSET test, not an equality test. LayerZero delivers whenever the sender
+ * pays for everything the receiver demands; paying for more is legal, common, and
+ * documented ("non-blocking mismatch"). The old equality test called every difference a
+ * permanent block, and produced a HIGH on a corridor that had been delivering the whole
+ * time — verified by quoting a real message through it.
+ *
+ * The economics are what make the subset test the right one. EVERY DVN in the send config
+ * is paid on every message — required and optional alike; the threshold decides who must
+ * SIGN, never who gets PAID. So the sender's paid set is exactly the set of attestations
+ * that can exist, and the receiver can only ever demand a subset of it. (It also means
+ * optional DVNs are not free redundancy: you cannot stack an unbounded optional set,
+ * because each one bills on every message.)
+ *
+ * Compares canonical operator identities, never raw addresses: the same operator has a
+ * different address on every chain (BitGo is 0xc9ca319f… on ethereum and 0xf55E9dAe… on
+ * hyperliquid), so an address diff reports a mismatch between a DVN and itself.
+ */
+export function assessDeliverability(
+  sendNames: string[],
+  sendOptionalNames: string[],
+  recvRequiredNames: string[],
+  recvOptionalNames: string[],
+  recvOptionalThreshold: number,
+): Deliverability {
+  const paid = new Set([...sendNames, ...sendOptionalNames]);
+  const missingRequired = recvRequiredNames.filter((n) => !paid.has(n));
+  const optionalCovered = recvOptionalNames.filter((n) => paid.has(n)).length;
+  const optionalShortfall = Math.max(0, recvOptionalThreshold - optionalCovered);
+  const counted = new Set([...recvRequiredNames, ...recvOptionalNames]);
+  return {
+    blocked: missingRequired.length > 0 || optionalShortfall > 0,
+    missingRequired,
+    optionalShortfall,
+    overpaid: [...paid].filter((n) => !counted.has(n)),
+  };
 }
 
 function activeRoutes(snap: OftSnapshot): RouteSnapshot[] {
@@ -322,51 +447,140 @@ export async function assessSnapshot(
     }
 
     const dstChainKey = route.chainKey; // destination chainKey — for DVN name lookup on dst
+    const liveness: Liveness = route.liveness ?? "UNKNOWN";
 
-    // ── DVN count ───────────────────────────────────────────────────────────
-    // Effective security = required DVNs + optional DVNs that must all sign (threshold).
-    // e.g. 2 required + 3 optional threshold 2 → 4 distinct verifiers must agree.
-    const effectiveDvnCount = uln.requiredDVNCount + (uln.optionalDVNThreshold ?? 0);
-    const reqNames = uln.requiredDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta)).join(", ");
+    // Route-scoped SECURITY findings are bounded by whether value can move through this
+    // corridor at all (see the liveness law). Sensor-integrity findings — RPC Source
+    // Conflict, ULN Unreadable — are deliberately NOT routed through this: they say our
+    // reading is untrustworthy, and that is true whether or not the corridor carries
+    // traffic. Push those directly.
+    const pushRoute = (f: Finding): Finding => {
+      const capped = capByLiveness(f, liveness);
+      if (capped.severity !== f.severity) f.severity = capped.severity;
+      findings.push(f);
+      return f;
+    };
+
+    const recvUln = route.receiveUln;
+
+    // ── Dead / unconfigured pathway — RECEIVE side ───────────────────────────
+    // Mirror of the send-side Dead Pathway rule above, and only reachable from 4.0.0,
+    // because scoring the receive side is what first exposes us to a dead receive config.
+    //
+    // A destination whose required DVN set is entirely an LZ Dead DVN placeholder can
+    // never verify anything, so the route is unconfigured and message-blocked — NOT a
+    // live 1-of-1. A dead DVN cannot be compromised into forging a message; it cannot
+    // attest at all. Scoring it as the Kelp pattern would assert a forgery risk the
+    // config does not support, which is precisely the class of false CRITICAL this
+    // release exists to remove — so it would be a poor joke to introduce a new one.
+    //
+    // Caught by A/B-ing 4.0.0 against 3.0.0 over the whole fleet, which surfaced it as a
+    // NEW CRITICAL on a real asset. Every unit test passed; only the diff against live
+    // data found it. That is the entire argument for running the A/B before shipping.
+    if (recvUln && recvUln.requiredDVNs.length > 0 &&
+        recvUln.requiredDVNs.every((a) => isDeadDvn(a, dstChainKey, dvnMeta))) {
+      pushRoute({
+        severity: "LOW",
+        evidence: "observed",
+        check: "Dead Pathway",
+        detail: `${route.chainName}: the DESTINATION's required DVN set is entirely an LZ Dead DVN placeholder — the receive side can verify nothing, so messages are blocked and cannot be delivered (funds bridged here would be stuck until the destination OApp sets real DVNs). Not a live 1-of-1: a dead DVN cannot attest, so it cannot be compromised to forge.`,
+      });
+      continue;
+    }
+
+    // ── DVN count: score the RECEIVE side, the enforcement boundary ──────────
+    // A message is accepted where it LANDS. The destination's required set plus its
+    // optional threshold is the quorum an attacker must defeat to forge a transfer.
+    // Whatever else the sender paid for has no bearing on acceptance — so scoring the
+    // send side, as this rule did until 4.0.0, measures who PAYS rather than who GUARDS.
+    const recvIsReadable = !!recvUln && effectiveDvns(recvUln) >= 1;
+    const sendPaidCount = uln.requiredDVNCount + uln.optionalDVNCount;
+
+    let effectiveDvnCount: number;
+    let dvnEvidence: Evidence;
+    let dvnNames: string;
+    let quorumNote: string;
+
+    if (recvIsReadable) {
+      // The enforcement boundary itself, read from the destination chain.
+      effectiveDvnCount = effectiveDvns(recvUln!);
+      dvnEvidence = "observed";
+      dvnNames = [...recvUln!.requiredDVNs, ...recvUln!.optionalDVNs]
+        .map((a) => resolveDvn(a, dstChainKey, dvnMeta)).join(", ");
+      quorumNote = recvUln!.optionalDVNCount > 0
+        ? `${recvUln!.requiredDVNCount} required + ${recvUln!.optionalDVNThreshold}-of-${recvUln!.optionalDVNCount} optional, on the receive side`
+        : `${recvUln!.requiredDVNCount} required, on the receive side`;
+    } else {
+      // Destination config unreadable, so we are reading the send side and reasoning
+      // about the receive side. Usually that is a PROXY, not the boundary — the receiver
+      // may demand a different quorum than the sender pays for — so the evidence law caps
+      // it at MEDIUM and it can never ship a false CRITICAL.
+      //
+      // ONE case is a proof rather than a proxy, and it is the case that matters. If the
+      // sender pays exactly one DVN, then exactly one attestation can ever exist for this
+      // corridor, so the receiver CANNOT require more than that one — there is nothing
+      // else for it to require. Every message that lands here is secured by a single
+      // verifier. The config admits no other reading:
+      //
+      //     sender pays ≤1 DVN  ⟹  (corridor is dead)  OR  (boundary is a real 1-of-1)
+      //
+      // There is no third branch, and the dead branch is not the evidence law's job — it
+      // is exactly what capByLiveness handles. So this stays `observed`, and the Kelp
+      // 1-of-1 keeps firing CRITICAL on a corridor we cannot see the far side of.
+      //
+      // Note this keys on how many DVNs are PAID, not the send-side effective count. A
+      // sender paying 3 optional DVNs with a threshold of 1 has an effective count of 1
+      // but produces three attestations, and the receiver may well require two of them —
+      // that is a genuine proxy, and it is correctly capped as inferred.
+      effectiveDvnCount = effectiveDvns(uln);
+      dvnEvidence = sendPaidCount <= 1 ? "observed" : "inferred";
+      dvnNames = uln.requiredDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta)).join(", ");
+      quorumNote = sendPaidCount <= 1
+        ? "receive config unreadable, but the sender pays only this one DVN — no larger quorum can exist"
+        : "receive config unreadable — send side used as a proxy";
+    }
+
+    const fixTarget = recvIsReadable ? "the destination's receive config" : "the send configuration";
+
     if (effectiveDvnCount <= 1) {
       const f: Finding = {
         severity: "CRITICAL",
-        evidence: "observed",
+        evidence: dvnEvidence,
         check: "DVN Count",
-        detail: `${route.chainName}: 1-of-1 effective DVN (${reqNames || "unresolved"}): single point of failure (Kelp rsETH exploit pattern).`,
+        detail: `${route.chainName}: 1 effective DVN (${dvnNames || "unresolved"}; ${quorumNote}): a single compromised verifier can forge a message the destination will accept (Kelp rsETH exploit pattern).`,
       };
-      findings.push(f);
+      pushRoute(f);
       // Successor: adding one DVN lands in the 2-of-2 state, which itself
       // scores MEDIUM — pre-flight must predict 84/AT_RISK, not 100/PASS.
       const successor: Finding = {
         severity: "MEDIUM",
-        evidence: "observed",
+        evidence: dvnEvidence,
         check: "DVN Count",
         detail: `${route.chainName}: 2 effective DVNs after fix: minimal redundancy.`,
       };
       addTIS("restore_dvn_redundancy", route.chainName, {
         intent: "restore_dvn_redundancy",
-        action: "Add a second independent required DVN to the send configuration",
+        action: `Add a second independent required DVN to ${fixTarget}`,
         dvnAddress: uln.requiredDVNs[0],
         dvnName: uln.requiredDVNs[0] ? resolveDvn(uln.requiredDVNs[0], srcChainKey, dvnMeta) : undefined,
-        currentState: `1 effective DVN (${reqNames || "unresolved"}): single point of failure`,
-        targetState: "≥2 independent required DVNs per message path",
+        currentState: `1 effective DVN (${dvnNames || "unresolved"}): single point of failure`,
+        targetState: "≥2 independent verifiers in the accepting quorum",
         reason: "1-of-1 DVN config matches the Kelp rsETH exploit pattern. Single DVN compromise enables message forgery.",
         severity: "CRITICAL",
       }, f, successor);
     } else if (effectiveDvnCount === 2) {
       const f: Finding = {
         severity: "MEDIUM",
-        evidence: "observed",
+        evidence: dvnEvidence,
         check: "DVN Count",
-        detail: `${route.chainName}: 2 effective DVNs (${reqNames}): minimal redundancy.`,
+        detail: `${route.chainName}: 2 effective DVNs (${dvnNames}; ${quorumNote}): minimal redundancy.`,
       };
-      findings.push(f);
+      pushRoute(f);
       addTIS("increase_dvn_redundancy", route.chainName, {
         intent: "increase_dvn_redundancy",
-        action: "Add a third independent required DVN to strengthen verification",
-        currentState: `2 effective DVNs (${reqNames}): one compromise breaks the quorum`,
-        targetState: "≥3 independent required DVNs per message path",
+        action: `Add a third independent required DVN to ${fixTarget}`,
+        currentState: `2 effective DVNs (${dvnNames}): one compromise breaks the quorum`,
+        targetState: "≥3 independent verifiers in the accepting quorum",
         reason: "2-of-2 DVN config means a single DVN compromise or liveness failure halts all messages",
         severity: "MEDIUM",
       }, f);
@@ -383,7 +597,7 @@ export async function assessSnapshot(
           check: "Deprecated DVN",
           detail: `${route.chainName}: required DVN "${name}" is deprecated: messages may halt.`,
         };
-        findings.push(f);
+        pushRoute(f);
         addTIS(`replace_deprecated_dvn|${dvnAddr.toLowerCase()}`, route.chainName, {
           intent: "replace_deprecated_dvn",
           action: `Replace deprecated DVN "${name}" with an active supported alternative`,
@@ -430,40 +644,65 @@ export async function assessSnapshot(
       }
     }
 
-    // ── Cross-chain DVN mismatch ─────────────────────────────────────────────
-    // Compare source send-DVN names (resolved on source chain) against
-    // destination receive-DVN names (resolved on destination chain).
-    // A mismatch = permanent message block (per LZ V2 docs).
+    // ── Deliverability: can the send config satisfy the receive config? ──────
+    // Formerly "DVN Mismatch", which demanded the two sets be EQUAL and called every
+    // difference a permanent block. Both halves of that were wrong. LayerZero delivers
+    // whenever the sender pays for everything the receiver requires; paying for MORE is
+    // legal and routine (LZ's documented "non-blocking mismatch"). The test is a SUBSET
+    // test, and the only thing at stake is deliverability — never security, which is
+    // settled entirely on the receive side by the DVN Count rule above.
     //
-    // Guard: only compare when EVERY DVN on BOTH sides resolves to a canonical
-    // name (not a raw address fragment). An unresolved address compares unequal
-    // by definition — that is a resolution gap, not a real mismatch — and would
-    // fire a false HIGH. Linea has no entry in the DVN metadata API; those
-    // routes safely fall through here.
-    if (uln.requiredDVNs.length > 0 && route.receiveUln?.requiredDVNs?.length) {
-      const sendNames = uln.requiredDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta));
-      const recvNames = route.receiveUln.requiredDVNs.map((a) => resolveDvn(a, dstChainKey, dvnMeta));
+    // Guard retained: only compare when EVERY DVN on BOTH sides resolves to a canonical
+    // name. An unresolved address fragment compares unequal to everything by definition,
+    // which is a resolution gap, not a mismatch. Linea has no entry in the DVN metadata
+    // API; those routes fall through here safely.
+    if (uln.requiredDVNs.length > 0 && recvUln?.requiredDVNs?.length) {
       const isResolved = (name: string) => !name.endsWith("…"); // address fragment = unresolved
-      const allResolved = sendNames.every(isResolved) && recvNames.every(isResolved);
-      if (allResolved) {
-        const sendSet = new Set(sendNames);
-        const recvSet = new Set(recvNames);
-        if (sendSet.size !== recvSet.size || [...sendSet].some((n) => !recvSet.has(n))) {
+      const sendReq = uln.requiredDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta));
+      const sendOpt = uln.optionalDVNs.map((a) => resolveDvn(a, srcChainKey, dvnMeta));
+      const recvReq = recvUln.requiredDVNs.map((a) => resolveDvn(a, dstChainKey, dvnMeta));
+      const recvOpt = recvUln.optionalDVNs.map((a) => resolveDvn(a, dstChainKey, dvnMeta));
+
+      if ([...sendReq, ...sendOpt, ...recvReq, ...recvOpt].every(isResolved)) {
+        const d = assessDeliverability(sendReq, sendOpt, recvReq, recvOpt, recvUln.optionalDVNThreshold ?? 0);
+        const paidList = [...sendReq, ...sendOpt].join(", ");
+        const recvList = recvOpt.length
+          ? `${recvReq.join(", ")} + ${recvUln.optionalDVNThreshold}-of-[${recvOpt.join(", ")}]`
+          : recvReq.join(", ");
+
+        if (d.blocked) {
+          // A real permanent block: the destination demands a verifier the sender does
+          // not pay, so its quorum can never be met and no message can ever land.
+          const why = d.missingRequired.length
+            ? `destination requires [${d.missingRequired.join(", ")}], which the sender does not pay`
+            : `sender covers ${d.optionalShortfall} too few of the destination's optional DVNs (needs ${recvUln.optionalDVNThreshold})`;
           const f: Finding = {
             severity: "HIGH",
             evidence: "observed",
-            check: "DVN Mismatch",
-            detail: `${route.chainName}: send DVNs [${sendNames.join(", ")}] != receive DVNs [${recvNames.join(", ")}]. Messages will be permanently blocked.`,
+            check: "Undeliverable Route",
+            detail: `${route.chainName}: sender pays [${paidList}] but the destination accepts on [${recvList}] — ${why}. Messages cannot be delivered.`,
           };
-          findings.push(f);
+          pushRoute(f);
           addTIS(`resolve_dvn_mismatch`, route.chainName, {
             intent: "resolve_dvn_mismatch",
-            action: "Align send and receive DVN sets so both sides verify the same providers",
-            currentState: `Send [${sendNames.join(", ")}] ≠ receive [${recvNames.join(", ")}]`,
-            targetState: "Matching DVN sets on send and receive sides",
-            reason: "DVN mismatch means no message can be verified: permanent route block",
+            action: "Add the destination's required DVNs to the send config (or drop them from the receive config)",
+            currentState: `Sender pays [${paidList}]; destination accepts on [${recvList}]`,
+            targetState: "Sender pays for every DVN the destination requires",
+            reason: "The destination's verification quorum can never be met, so no message can be delivered",
             severity: "HIGH",
           }, f);
+        } else if (d.overpaid.length > 0) {
+          // Non-blocking mismatch. Messages flow — the sender simply pays verifiers the
+          // destination does not count. Not a vulnerability, so it must not carry a
+          // severity; recorded as a PASS so the drift signal stays visible in the PDR
+          // without deducting score or firing an alert. This is the exact shape that
+          // produced the false "permanently blocked" HIGH under 3.0.0.
+          findings.push({
+            severity: "PASS",
+            evidence: "observed",
+            check: "Non-Blocking DVN Mismatch",
+            detail: `${route.chainName}: sender pays [${paidList}] but the destination only accepts on [${recvList}] — extra DVNs [${d.overpaid.join(", ")}] are paid for and ignored. Messages deliver normally; security is set by the receive side. Fees are higher than necessary.`,
+          });
         }
       }
     }
@@ -476,7 +715,7 @@ export async function assessSnapshot(
         check: "Confirmations",
         detail: `${route.chainName}: ${uln.confirmations} block confirmations (< 15, reorg risk).`,
       };
-      findings.push(f);
+      pushRoute(f);
       addTIS("increase_confirmations", route.chainName, {
         intent: "increase_confirmations",
         action: "Raise confirmation threshold to ≥15 blocks",
@@ -505,7 +744,7 @@ export async function assessSnapshot(
         check: "Send Library Pinning",
         detail: `${route.chainName}: send library is the upgradeable default. LZ Labs OneSig can redirect outbound verification unilaterally.`,
       };
-      findings.push(f);
+      pushRoute(f);
       addTIS("pin_send_library", route.chainName, {
         intent: "pin_send_library",
         action: "Pin the send library to a specific version",
@@ -527,7 +766,7 @@ export async function assessSnapshot(
         check: "Receive Library",
         detail: `${route.chainName}: receive library is the upgradeable default. LZ Labs can change inbound message acceptance rules unilaterally, bypassing DVN config.`,
       };
-      findings.push(f);
+      pushRoute(f);
       addTIS("pin_receive_library", route.chainName, {
         intent: "pin_receive_library",
         action: "Pin the receive library to a specific version",
@@ -548,7 +787,7 @@ export async function assessSnapshot(
         check: "Confirmation Mismatch",
         detail: `${route.chainName}: send confirmations (${route.uln.confirmations}) < receive required (${route.receiveUln.confirmations}). Messages will be permanently blocked.`,
       };
-      findings.push(f);
+      pushRoute(f);
       addTIS(`resolve_confirmation_mismatch`, route.chainName, {
         intent: "resolve_confirmation_mismatch",
         action: `Raise send confirmations to match the destination's required ${route.receiveUln.confirmations}`,

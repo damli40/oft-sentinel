@@ -40,11 +40,13 @@ const f = (severity: Finding["severity"], evidence: Finding["evidence"]): Findin
 });
 
 describe("rulesVersion", () => {
-  // 3.0.0 is MAJOR twice over: the PDR gained dvnMetaHash/dvnMetaFetchedAt (shape +
-  // verdictHash change), and per-chain dead-DVN detection can turn a former
-  // "Dead Pathway" LOW into the CRITICAL it always should have been.
-  it("is 3.0.0 — PDR pins DVN metadata provenance + per-chain dead-DVN detection", () => {
-    expect(RULES_VERSION).toBe("3.0.0");
+  // 4.0.0 is MAJOR because severities move on real assets in both directions: security is
+  // now scored on the RECEIVE side (an OFT whose receive quorum is 1-of-1 used to score
+  // PASS), DVN mismatch became a subset deliverability test (a HIGH "permanently blocked"
+  // turned out to be a live, healthy corridor), and liveness caps findings on corridors
+  // no value can move through.
+  it("is 4.0.0 — receive-side scoring, subset deliverability, liveness gate", () => {
+    expect(RULES_VERSION).toBe("4.0.0");
   });
 });
 
