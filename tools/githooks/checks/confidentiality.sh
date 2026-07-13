@@ -18,6 +18,9 @@ if [ -f "$INV" ] && command -v node >/dev/null; then
   DYN="$(node "$WALKER" "$INV" 2>/dev/null || true)"
   PATTERNS="$(printf '%s\n%s' "$PATTERNS" "$DYN")"
 fi
+# Drop empty lines: an empty ERE matches every line under GNU grep (portability
+# beyond BSD grep), and printf above emits a blank line when static patterns are absent.
+PATTERNS="$(printf '%s\n' "$PATTERNS" | grep -v '^$' || true)"
 [ -n "$PATTERNS" ] || exit 0
 STATUS=0
 while IFS= read -r file; do
