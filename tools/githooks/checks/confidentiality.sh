@@ -25,7 +25,14 @@ PATTERNS="$(printf '%s\n' "$PATTERNS" | grep -v '^$' || true)"
 STATUS=0
 while IFS= read -r file; do
   case "$file" in tools/githooks/confidentiality-patterns.txt) continue;; esac
-  HITS="$(git show ":$file" | grep -nIE -f <(printf '%s\n' "$PATTERNS") || true)"
+  # Fail CLOSED if the staged blob can't be read (e.g. core.quotePath mangling a
+  # non-ASCII filename) — an unscannable file must block, not silently pass.
+  if ! BLOB="$(git show ":$file" 2>/dev/null)"; then
+    echo "confidentiality: cannot read staged blob for '$file' — failing closed."
+    STATUS=1
+    continue
+  fi
+  HITS="$(printf '%s\n' "$BLOB" | grep -nIE -f <(printf '%s\n' "$PATTERNS") || true)"
   if [ -n "$HITS" ]; then
     echo "confidentiality: hit in $file:"
     echo "$HITS" | head -5
