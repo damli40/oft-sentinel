@@ -1,5 +1,13 @@
 # OFT Sentinel
 
+<!-- 7-LINE SUMMARY -->
+<!-- Public README for OFT Sentinel: what the product is and how to run it. -->
+<!-- An always-on agent that monitors LayerZero OFT security configuration on Mantle. -->
+<!-- Detects security-relevant configuration drift the moment it happens and alerts teams. -->
+<!-- Writes immutable on-chain attestations; every verdict is reproducible (keccak256(pdr) == verdictHash). -->
+<!-- Stack: TypeScript + Node/Express backend, React/Vite frontend, viem RPC reads, Hardhat contracts on Mantle. -->
+<!-- Freshness: 2026-07-13. -->
+
 **Continuous trust-intelligence for omnichain assets on Mantle.**
 
 OFT Sentinel is an always-on agent that reads the live LayerZero DVN configuration for every high-value OFT on Mantle, detects security-relevant changes the moment they happen, writes immutable on-chain attestations with a verifiable Policy Decision Record, and alerts teams before funds move.
