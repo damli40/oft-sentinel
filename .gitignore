@@ -23,6 +23,9 @@ backend/data/
 *.md
 !README.md
 
+# pre-commit confidentiality patterns — names the things that must never be committed
+tools/githooks/confidentiality-patterns.txt
+
 # Logs
 *.log
 npm-debug.log*
