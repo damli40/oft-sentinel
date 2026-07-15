@@ -192,10 +192,10 @@ export function FlowAnimation() {
       ctx.fillStyle = SCAN;
       ctx.font = "bold 11px monospace";
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText("MNT", x, y);
+      ctx.fillText("DST", x, y);
       ctx.fillStyle = SCAN + "77";
       ctx.font = "9px monospace"; ctx.textBaseline = "top";
-      ctx.fillText("MANTLE", x, y + r + 7);
+      ctx.fillText("DESTINATION", x, y + r + 7);
     }
 
     function drawPackets() {
@@ -252,7 +252,7 @@ export function FlowAnimation() {
     <div className="flow-wrap">
       <div className="sec-title" style={{ margin: "64px 0 0" }}>
         <h2>Message flow · live</h2>
-        <div className="meta">CROSS-CHAIN → DVN CHECK → MANTLE</div>
+        <div className="meta">CROSS-CHAIN → DVN CHECK → DESTINATION</div>
       </div>
       <div className="flow-box" ref={boxRef} />
       <div className="flow-legend">

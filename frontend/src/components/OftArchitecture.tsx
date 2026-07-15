@@ -52,7 +52,7 @@ const STOPS: Stop[] = [
     detail: "<b>ReceiveULN302</b> + destination Endpoint. Checks the DVN threshold is met (every required DVN verified), commits the nonce, and enforces that only the configured workers could have verified. <b>Critical rule:</b> the Send config on the source must mirror the Receive config here.",
     sev: "crit", watch: "A receive library reverting to <b>default bypasses DVN verification</b>. Sentinel rates that <b>CRITICAL</b>, because anything can then pass as verified." },
 
-  { id: "dst", n: 7, label: "Destination OFT", cap: "MANTLE", layer: "Application", glyph: "⊕", watched: false,
+  { id: "dst", n: 7, label: "Destination OFT", cap: "DEST CHAIN", layer: "Application", glyph: "⊕", watched: false,
     plain: "Your tokens reappear for the recipient, minted or unlocked.",
     detail: "The token contract you’re sending <b>to</b>. It <b>credits</b> the recipient: a standard OFT <b>mints</b> the same amount that was burned on the source, an Adapter <b>unlocks</b> it. Optional <b>lzCompose</b> can trigger follow-up logic. Same amount out, same amount in, one global supply." },
 ];
@@ -212,7 +212,7 @@ export function OftArchitecture() {
 
     function showEmptyPanel() {
       panel.className = "arch-panel card empty";
-      panel.innerHTML = '<div class="ph">Click any step, or press <span class="em">▶ Play transfer</span> to watch a token travel the full path from source to Mantle.</div>';
+      panel.innerHTML = '<div class="ph">Click any step, or press <span class="em">▶ Play transfer</span> to watch a token travel the full path from source to destination.</div>';
     }
 
     /* ---------- progress segments ---------- */

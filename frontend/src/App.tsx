@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { Aperture } from "./components/Aperture.tsx";
 import { Storyboard } from "./components/Storyboard.tsx";
-import { MantleBoard } from "./components/MantleBoard.tsx";
+import { FleetBoard } from "./components/FleetBoard.tsx";
 import { SentinelDashboard } from "./components/SentinelDashboard.tsx";
 import { FlowAnimation } from "./components/FlowAnimation.tsx";
 import { OftArchitecture } from "./components/OftArchitecture.tsx";
@@ -13,30 +13,6 @@ import "./architecture.css";
 type View = "app" | "story" | "sentinel";
 
 function pad(n: number) { return String(Math.round(n)).padStart(2, "0"); }
-
-function useCountUp(target: number, dur = 1400) {
-  const [val, setVal] = useState(0);
-  const ran = useRef(false);
-  useEffect(() => {
-    if (!target || ran.current) return;
-    ran.current = true;
-    const start = performance.now();
-    const frame = (t: number) => {
-      const p = Math.min(1, (t - start) / dur);
-      const e = 1 - Math.pow(1 - p, 3);
-      setVal(target * e);
-      if (p < 1) requestAnimationFrame(frame);
-    };
-    requestAnimationFrame(frame);
-  }, [target, dur]);
-  return val;
-}
-
-function formatVol(n: number): string {
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(0)}M`;
-  return `$${n.toFixed(0)}`;
-}
 
 function ago(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -102,7 +78,7 @@ interface HeroProps {
 }
 
 function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
-  const totalVol = ofts?.reduce((s, o) => s + o.usdVolume, 0) ?? 0;
+  const chains = status ? new Set(status.watched.map(w => w.chainId)).size : 0;
   const oftsWatched = status?.watched.length ?? ofts?.length ?? 0;
   const criticals = status?.watched.filter(w => w.assessment?.riskLevel === "CRITICAL").length ?? 0;
   const lastPollMs = status?.watched.reduce((m, w) => Math.max(m, w.lastSnapshotAt ?? 0), 0) ?? 0;
@@ -118,16 +94,12 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
     return () => clearInterval(id);
   }, []);
 
-  const animVol = useCountUp(totalVol / 1e9, 1400);
-  const animOfts = useCountUp(oftsWatched, 1200);
-  const animCrit = useCountUp(criticals, 1000);
-
   return (
     <div className="hero">
       <div className="hero-copy">
         <span className="kicker">
           <span className="live-dot" style={{ background: "var(--scan)", boxShadow: "0 0 8px var(--scan)" }} />
-          AUTONOMOUS OFT SECURITY · LIVE ON MANTLE
+          AUTONOMOUS OFT SECURITY · ETHEREUM · BASE · MANTLE
         </span>
         <h1>
           Configurable trust,<br />
@@ -136,7 +108,7 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
         <p className="lede">
           LayerZero lets every token pick its own verifiers, thresholds, and libraries,
           <b> the most flexible security model in crypto</b>. <b>OFT Sentinel</b> reads that config
-          live on Mantle every five minutes and writes on-chain proof it stays safe.
+          live across Ethereum, Base, and Mantle every hour and writes on-chain proof it stays safe.
         </p>
         <div className="cta-row">
           <button className="btn btn-primary" onClick={onSentinel}>
@@ -159,10 +131,8 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
         </a>
         <div className="live-strip">
           <div className="stat">
-            <div className="v tnum" id="s-vol">
-              {ofts ? `$${animVol.toFixed(1)}B` : "-"}
-            </div>
-            <div className="l">MONITORED VOLUME</div>
+            <div className="v tnum" id="s-chains">{chains || "-"}</div>
+            <div className="l">CHAINS</div>
           </div>
           <div className="stat">
             <div className="v tnum" id="s-ofts">{oftsWatched || "-"}</div>
@@ -178,7 +148,7 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
             <div className="v tnum" id="s-last" style={{ color: "var(--scan)" }}>
               {lastPollMs ? ago(lastPollMs) : "-"}
             </div>
-            <div className="l">LAST POLL</div>
+            <div className="l">LAST SWEEP</div>
           </div>
         </div>
       </div>
@@ -192,12 +162,11 @@ export default function App() {
   const [runKelpOnOpen, setRunKelpOnOpen] = useState(false);
   const [ofts, setOfts] = useState<MantleOft[] | null>(null);
   const [status, setStatus] = useState<SentinelStatus | null>(null);
-  const [oftsError, setOftsError] = useState("");
 
   useEffect(() => {
     getMantleOfts()
       .then(r => setOfts(r.ofts))
-      .catch(e => setOftsError(e.message));
+      .catch(() => {}); // volume column simply stays empty if Dune is down
     getSentinelStatus()
       .then(setStatus)
       .catch(() => {}); // silent fail if backend is not running
@@ -222,7 +191,7 @@ export default function App() {
   if (view === "sentinel") {
     return (
       <div className="app">
-        <Header view="sentinel" onNav={v => { setView(v as View); window.scrollTo(0, 0); }} />
+        <Header view="sentinel" onNav={v => { setView(v as View); window.scrollTo(0, 0); }} oftCount={status?.watched.length} />
         <SentinelDashboard runKelpOnMount={runKelpOnOpen} onKelpConsumed={() => setRunKelpOnOpen(false)} />
       </div>
     );
@@ -230,7 +199,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <Header view="app" onNav={v => { setView(v as View); window.scrollTo(0, 0); }} />
+      <Header view="app" onNav={v => { setView(v as View); window.scrollTo(0, 0); }} oftCount={status?.watched.length} />
 
       <section id="view-home" className="view on">
         <div className="page">
@@ -251,10 +220,10 @@ export default function App() {
                   OFT
                   <span className="tipbox"><b>OFT</b>: a token that can move across multiple blockchains via LayerZero.</span>
                 </span>
-                {" "}on Mantle, re-checked every hour. The agent reads each bridge's live on-chain config and looks for dangerous drift.
+                {" "}on Ethereum, Base, and Mantle, re-checked every hour. The agent reads each bridge's live on-chain config and looks for dangerous drift.
               </p>
               <div className="metric">
-                {status ? `${status.watched.length} OFTs` : "28 OFTs"} · hourly
+                {status ? `${status.watched.length} OFTs` : "175 OFTs"} · 3 chains · hourly
               </div>
             </div>
             <div className="prop">
@@ -290,15 +259,11 @@ export default function App() {
           <OftArchitecture />
 
           <div className="sec-title" id="boardSec">
-            <h2>Mantle OFT leaderboard</h2>
-            <div className="meta">SORTED BY VOLUME · LIVE SENTINEL STATUS</div>
+            <h2>The fleet</h2>
+            <div className="meta">LIVE SENTINEL STATUS · BY CHAIN</div>
           </div>
 
-          <MantleBoard
-            ofts={ofts}
-            error={oftsError}
-            status={status?.watched}
-          />
+          <FleetBoard status={status?.watched} ofts={ofts} />
 
           <div className="cta-band">
             <div>
@@ -313,8 +278,38 @@ export default function App() {
             </button>
           </div>
 
+          <div className="cta-band">
+            <div>
+              <h2>Don't see your chain or token?</h2>
+              <p>
+                Sentinel adds chains and OFTs on request. Reach out and we'll put your
+                bridge config on watch, with hourly checks and on-chain proof.
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <a
+                className="btn btn-primary"
+                style={{ textDecoration: "none" }}
+                href="https://x.com/rookie_of_Ph"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                DM on X →
+              </a>
+              <a
+                className="btn btn-ghost"
+                style={{ textDecoration: "none" }}
+                href="https://t.me/damitheG"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Message on Telegram →
+              </a>
+            </div>
+          </div>
+
           <footer className="foot">
-            <div>OFT Sentinel · Autonomous security for LayerZero on Mantle</div>
+            <div>OFT Sentinel · Autonomous security for LayerZero OFTs · Ethereum · Base · Mantle</div>
             <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
               <button
                 onClick={() => setView("story")}
@@ -333,7 +328,7 @@ export default function App() {
 
 // ── Shared header ─────────────────────────────────────────────────────────────
 
-function Header({ view, onNav }: { view: View; onNav: (v: string) => void }) {
+function Header({ view, onNav, oftCount }: { view: View; onNav: (v: string) => void; oftCount?: number }) {
   return (
     <header className="appbar">
       <div className="brand" onClick={() => onNav("app")} style={{ cursor: "pointer" }}>
@@ -361,7 +356,7 @@ function Header({ view, onNav }: { view: View; onNav: (v: string) => void }) {
       <div className="spacer" />
       <div className="status-chip">
         <span className="live-dot" />
-        <span id="hdrStatus">SENTINEL ACTIVE · 28 OFTs</span>
+        <span id="hdrStatus">{oftCount ? `SENTINEL ACTIVE · ${oftCount} OFTs` : "SENTINEL ACTIVE"}</span>
       </div>
       <button className="btn btn-primary btn-sm appbar-cta" onClick={() => onNav("sentinel")}>
         Open the Sentinel →
