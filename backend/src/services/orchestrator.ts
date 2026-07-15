@@ -2,7 +2,7 @@ import type { OftSnapshot, WatchedOft, SentinelVerdict, Finding, RiskLevel, Tran
 import { detectDrift, assessSnapshot, RULES_VERSION } from "./drift.js";
 import { verdictHash, attest } from "./attestor.js";
 import { dispatchAlert } from "./alerts.js";
-import { getSnapshot, putSnapshot, recordVerdict } from "./snapshot-store.js";
+import { getSnapshot, putSnapshot, recordVerdict, getWeakAlertFingerprint, putWeakAlertFingerprint } from "./snapshot-store.js";
 import { loadDvnMeta, dvnMetaHash } from "./lz-config.js";
 
 /** Async because the PDR now pins the DVN table that decided the findings. loadDvnMeta()
@@ -25,14 +25,20 @@ async function buildPdr(
   };
 }
 
-// Per-boot set: once an OFT's weak-config alert fires this session it won't re-fire
-// until the backend restarts. Cleared automatically on process exit.
-const weakAlertFired = new Set<string>();
+// Identity of a weak-config alert: the findings that would be disclosed, not the
+// moment they were computed. The full verdictHash can't dedupe here — the PDR pins
+// evaluatedAt, so every cycle would look "new". Excluding timestamps makes the
+// fingerprint stable across polls AND restarts, while any material change (finding
+// set, score, risk, rules version) re-fires.
+function weakConfigFingerprint(findings: Finding[], score: number, riskLevel: RiskLevel): string {
+  return verdictHash({ kind: "weak-config", findings, score, riskLevel, rulesVersion: RULES_VERSION });
+}
 
 /**
  * Full alert pipeline for a persistently CRITICAL config that hasn't drifted:
  * attests to AuditRegistry, fires AlertBus (with OFT address + tx links in Telegram),
- * then marks the OFT so it won't re-fire this boot.
+ * then stores the fingerprint (persisted, keyed chainId:address) so neither later
+ * cycles nor a backend restart re-fires it while the findings are unchanged.
  */
 export async function produceWeakConfigAttestation(
   watched: WatchedOft,
@@ -42,7 +48,8 @@ export async function produceWeakConfigAttestation(
   riskLevel: RiskLevel,
   tis: TransactionIntent[],
 ): Promise<void> {
-  if (weakAlertFired.has(watched.address)) return;
+  const fingerprint = weakConfigFingerprint(findings, score, riskLevel);
+  if (getWeakAlertFingerprint(watched.address, watched.chainId) === fingerprint) return;
 
   const reasons = findings.filter(f => f.severity !== "PASS").map(f => f.detail);
   const pdr = await buildPdr(snapshot.oft, watched.chainId, findings, score, riskLevel, Date.now());
@@ -77,7 +84,7 @@ export async function produceWeakConfigAttestation(
     console.error(`[sentinel] weak-config alert failed for ${watched.ticker}:`, e.shortMessage ?? e.message);
   }
   recordVerdict(verdict);
-  weakAlertFired.add(watched.address);
+  putWeakAlertFingerprint(watched.address, watched.chainId, fingerprint);
 }
 
 function synthVerdict(reasons: string[], score: number, riskLevel: string): string {

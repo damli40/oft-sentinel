@@ -17,6 +17,10 @@ interface State {
   // latestVerdict() (tile/overlay) but stay in the ledger — the on-chain
   // attestations are immutable. Set by "Reset demo".
   verdictsClearedAt?: Record<string, number>;
+  // key → fingerprint of the last weak-config (persistent CRITICAL, no drift)
+  // attestation fired. Persisted so a backend restart cannot re-attest and
+  // re-alert the whole CRITICAL band; a changed fingerprint re-fires.
+  weakAlerts?: Record<string, { fingerprint: string; firedAt: number }>;
 }
 
 let memState: State | null = null;
@@ -80,6 +84,16 @@ export function latestVerdict(oft: string, chainId: number): SentinelVerdict | n
 export function hideVerdictsBefore(oft: string, chainId: number, ts = Date.now()): void {
   const state = load();
   state.verdictsClearedAt = { ...state.verdictsClearedAt, [key(oft, chainId)]: ts };
+  save(state);
+}
+
+export function getWeakAlertFingerprint(oft: string, chainId: number): string | null {
+  return load().weakAlerts?.[key(oft, chainId)]?.fingerprint ?? null;
+}
+
+export function putWeakAlertFingerprint(oft: string, chainId: number, fingerprint: string): void {
+  const state = load();
+  state.weakAlerts = { ...state.weakAlerts, [key(oft, chainId)]: { fingerprint, firedAt: Date.now() } };
   save(state);
 }
 
