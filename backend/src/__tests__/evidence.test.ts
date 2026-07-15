@@ -40,13 +40,16 @@ const f = (severity: Finding["severity"], evidence: Finding["evidence"]): Findin
 });
 
 describe("rulesVersion", () => {
-  // 4.0.0 is MAJOR because severities move on real assets in both directions: security is
-  // now scored on the RECEIVE side (an OFT whose receive quorum is 1-of-1 used to score
-  // PASS), DVN mismatch became a subset deliverability test (a HIGH "permanently blocked"
-  // turned out to be a live, healthy corridor), and liveness caps findings on corridors
-  // no value can move through.
-  it("is 4.0.0 — receive-side scoring, subset deliverability, liveness gate", () => {
-    expect(RULES_VERSION).toBe("4.0.0");
+  // 4.0.0 was MAJOR: receive-side scoring, subset deliverability, liveness gate.
+  // 4.1.0 is the corrected delivery law: delivery evidence (historical) may never soften
+  // a config-derived block claim (current) — it only escalates (STRANDING), contradicts
+  // (sensor flag), or annotates (UNTESTED/UNUSED/UNKNOWN keep config severity). Also
+  // renames Confirmation Asymmetry → Block Confirmation Mismatch (LZ docs' own name) and
+  // scores it HIGH per those docs. Minor, not major: no quorum semantics change, but
+  // severities on delivery-gated findings move UP on real assets — fleet A/B required
+  // before this ships (START HERE item 4).
+  it("is 4.1.0 — the corrected delivery law: history never softens a block claim", () => {
+    expect(RULES_VERSION).toBe("4.1.0");
   });
 });
 
@@ -193,7 +196,7 @@ describe("Self-DVN is a plus, not a flaw", () => {
     expect((await assess(snap({ routes: route() }), "LINK", null)).findings.find((x: Finding) => x.check === "Self-DVN")).toBeDefined();
 
     assess = await withMeta(entries);
-    expect((await assess(snap({ routes: route() }), "PROMPT", null)).findings.find((x: Finding) => x.check === "Self-DVN")).toBeUndefined();
+    expect((await assess(snap({ routes: route() }), "OTHERTKN", null)).findings.find((x: Finding) => x.check === "Self-DVN")).toBeUndefined();
   });
 
   it("an unlisted protocol gets no credit rather than a wrong one", async () => {

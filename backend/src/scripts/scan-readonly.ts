@@ -8,7 +8,7 @@
 import "dotenv/config";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { readSnapshot } from "../services/lz-config.js";
-import { assessSnapshot } from "../services/drift.js";
+import { assessSnapshot, deliveryState } from "../services/drift.js";
 import { RULES_VERSION } from "../services/drift.js";
 import { getWatched } from "../services/sentinel.js";
 import { getChainRef } from "../services/chain-registry.js";
@@ -49,11 +49,23 @@ await mapLimit(watched, CONCURRENCY, async (w) => {
 
     const { score, riskLevel, findings } = await assessSnapshot(snap, w.ticker);
     const active = snap.routes.filter((r) => r.isActive);
-    // Liveness census. Without this we cannot tell a working severity gate from an inert
+    // Sendability census. Without this we cannot tell a working severity gate from an inert
     // one: if RPC pressure turned every corridor into UNKNOWN, the gate would silently
     // cap nothing and the scan would look identical to a healthy run.
-    const liveness = { LIVE: 0, DORMANT: 0, UNKNOWN: 0 } as Record<string, number>;
-    for (const r of active) liveness[r.liveness ?? "UNKNOWN"]++;
+    const sendability = { SENDABLE: 0, UNSENDABLE: 0, UNKNOWN: 0 } as Record<string, number>;
+    for (const r of active) sendability[r.sendability ?? "UNKNOWN"]++;
+    // Delivery census: the only thing that turns a config observation into a claim about
+    // value. STRANDING is the only state where funds are actually stuck.
+    const delivery = { STRANDING: 0, DELIVERING: 0, UNUSED: 0, UNKNOWN: 0 } as Record<string, number>;
+    let stranded = 0;
+    const halfWired: string[] = [];
+    for (const r of active) {
+      delivery[deliveryState(r)]++;
+      if (deliveryState(r) === "STRANDING" && r.delivery?.delivered != null) {
+        stranded += r.delivery.sent - r.delivery.delivered;
+      }
+      if (r.peerSymmetric === false) halfWired.push(r.chainName);
+    }
     const row = {
       ticker: w.ticker,
       address: w.address,
@@ -61,7 +73,10 @@ await mapLimit(watched, CONCURRENCY, async (w) => {
       chainKey: chainRef.chainKey,
       score,
       riskLevel,
-      liveness,
+      sendability,
+      delivery,
+      stranded,
+      halfWired,
       activeRoutes: active.length,
       findings: findings.map((f) => ({
         severity: f.severity,

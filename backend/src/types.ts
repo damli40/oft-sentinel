@@ -38,7 +38,7 @@ export interface Finding {
 // ── Custody declarations ──────────────────────────────────────────────────
 // Self-declared, unverified custody type for an OFT's owner key. On-chain data
 // cannot distinguish a Fireblocks MPC-custodied EOA from a raw hot wallet, so
-// teams declare (relayed manually for now) and the engine consumes the attestation.
+// teams declare (manual intake for now) and the engine consumes the attestation.
 
 export type CustodyType = "eoa_hot" | "fireblocks_mpc" | "safe_multisig" | "unknown";
 
@@ -69,21 +69,73 @@ export interface UlnSnapshot {
 }
 
 /**
- * Can value actually move through this corridor right now?
+ * Will this corridor ACCEPT A SEND right now?
  *
- * Teams pre-wire destination chains long before they open them, so a corridor can carry
- * a fully-formed config that no message has ever traversed. A security claim about money
- * that cannot move is not a security claim. Liveness bounds what the rules may assert
- * (see capByLiveness) and licenses the send-side upper-bound inference (see effectiveDvns).
+ * ⚠️ SENDABLE IS NOT DELIVERABLE. This is the single most important thing to know about
+ * this type, and getting it wrong is not hypothetical — it is why the receive-side dead
+ * pathway was first mis-scored as a harmless LOW advisory.
  *
- *  - LIVE     — quoteSend() returned a fee. The endpoint priced a real message: the
- *               corridor is wired end-to-end and will deliver.
- *  - DORMANT  — quoteSend() reverted. Pre-wired or misconfigured; nothing can be sent.
- *  - UNKNOWN  — the probe itself failed (RPC error, no peer to quote against). NOT a
- *               liveness verdict. Never caps severity: an infra hiccup must not be able
- *               to suppress a real CRITICAL.
+ * `quoteSend()` is priced entirely on the SOURCE chain, against the send library and the
+ * send ULN. It knows nothing whatsoever about the destination's receive config. So a
+ * successful quote proves only that the endpoint will price and accept a message — never
+ * that anything arrives.
+ *
+ * A corridor can therefore be SENDABLE and still be permanently undeliverable:
+ *   - send confirmations < the destination's required confirmations
+ *   - the destination requires a DVN the sender does not pay
+ *   - the destination's required DVN set is an LZ Dead DVN placeholder
+ * In every one of those, tokens leave the source and never arrive. That is STRICTLY WORSE
+ * than an unsendable route — an unsendable route at least refuses the money. Deliverability
+ * is a separate axis, decided by the receive-side rules, and it must stay that way.
+ *
+ * What this type IS good for: teams pre-wire destination chains long before opening them,
+ * so a corridor can carry a fully-formed config no message has ever crossed. A security
+ * claim about money that cannot even be sent is not a security claim (see capBySendability),
+ * and sendability is what separates a dormant, harmless misconfiguration from a live trap.
+ *
+ *  - SENDABLE   — quoteSend() returned a fee. The corridor accepts and prices a message.
+ *                 Says NOTHING about whether it will be delivered.
+ *  - UNSENDABLE — quoteSend() reverted. Nothing can enter this corridor at all.
+ *  - UNKNOWN    — the probe itself failed (RPC error, no peer to quote against). NOT a
+ *                 verdict. Never caps severity: an infra hiccup must not be able to
+ *                 suppress a real CRITICAL.
  */
-export type Liveness = "LIVE" | "DORMANT" | "UNKNOWN";
+export type Sendability = "SENDABLE" | "UNSENDABLE" | "UNKNOWN";
+
+/**
+ * How many messages this corridor has actually carried — the ONLY thing that turns a
+ * config observation into a claim about value.
+ *
+ * Three false findings shipped before this existed, all the same error: the engine
+ * measured a CONFIG property and asserted a CONSEQUENCE it had never observed. It saw a
+ * DVN set difference and said "permanently blocked" (the corridor was delivering). It saw
+ * a confirmation asymmetry and said "permanently blocked" (the corridor was delivering).
+ * It saw a dead receive-side DVN set and said "funds are stranded" (nobody had ever sent
+ * a message through it). Delivery is not inferable from config. It has to be counted.
+ *
+ *  - sent      — outboundNonce on the SOURCE endpoint: messages this OApp has emitted.
+ *  - delivered — inboundNonce on the DESTINATION endpoint: messages the destination
+ *                accepted. null = the destination read failed (never treat as zero).
+ *
+ * `sent - delivered` is stranded value: messages that left and never landed.
+ *
+ * ⚠️ This REVERSES the old "outboundNonce is worthless" note. It is worthless as a
+ * LIVENESS signal — a bricked corridor reads nonce 2 while a working one reads 0 — and
+ * that is precisely the point: a bricked corridor reading 2 means TWO MESSAGES WERE SENT
+ * INTO A CORRIDOR THAT CANNOT DELIVER. Useless for liveness, decisive for usage.
+ */
+export interface DeliverySnapshot {
+  sent: number;
+  delivered: number | null;
+  /** UNTESTED discriminator: was the CURRENT config already in force at the block of
+   *  the last send? `false` = the config changed after the last send, so nothing has
+   *  ever crossed under what we score (delivery history is stale evidence — the
+   *  lesson that produced this field). `true` = at least the last send happened
+   *  under this exact config.
+   *  Absent/null = not measured (the archival read is run only on corridors that
+   *  already carry a block-class finding — see scripts/verify-block-claims.ts). */
+  sentUnderCurrentConfig?: boolean | null;
+}
 
 /** One destination route's config as seen from the watched OFT's source chain. */
 export interface RouteSnapshot {
@@ -102,8 +154,16 @@ export interface RouteSnapshot {
   hasEnforcedOptions: boolean | null; // true if setEnforcedOptions was called for this eid
   isActive: boolean;
   rpcConflict?: boolean; // true if a secondary RPC returned different DVN config for this route
-  // Whether a message can actually be sent through this corridor (quoteSend probe).
-  liveness?: Liveness;
+  // Whether this corridor ACCEPTS A SEND (quoteSend probe). Not whether it delivers.
+  sendability?: Sendability;
+  // Messages actually sent vs actually delivered. Gates every block/strand claim.
+  delivery?: DeliverySnapshot | null;
+  // The DESTINATION's peer for this source chain. setPeer is one-directional: a source
+  // peer with no matching peer back means quoteSend succeeds, tokens leave, and
+  // lzReceive reverts on _getPeerOrRevert forever. null = unread, not "unset".
+  reversePeer?: string | null;
+  // true = destination peers back to this OFT; false = half-wired corridor; null = unread.
+  peerSymmetric?: boolean | null;
 }
 
 /** Full point-in-time config snapshot for a watched OFT. */
