@@ -35,3 +35,4 @@ npm-debug.log*
 
 # firecrawl CLI local cache
 .firecrawl/
+.worktrees/
