@@ -49,10 +49,13 @@ interface CorridorCase {
   expect: {
     receiveEffectiveDvns?: number;
     blocked?: boolean;
-    liveness?: string;
+    sendability?: string;
     sharedOperatorAcrossChains?: string;
     noUndeliverableFinding?: boolean;
     noCritical?: boolean;
+    /** A finding the engine MUST emit on this corridor. Pins a true positive in place,
+     *  the mirror of the `no*` assertions which pin false positives out. */
+    requireFinding?: { check: string; severity?: string; detailMatches?: string };
   };
 }
 
@@ -133,11 +136,11 @@ async function verify(c: CorridorCase, meta: DvnMeta): Promise<void> {
   }
 
   // Whether value can move at all — the thing that makes the config worth scoring.
-  if (e.liveness) {
+  if (e.sendability) {
     check(
-      `corridor liveness is ${e.liveness} (quoteSend)`,
-      route.liveness === e.liveness,
-      `liveness=${route.liveness}`,
+      `corridor sendability is ${e.sendability} (quoteSend)`,
+      route.sendability === e.sendability,
+      `sendability=${route.sendability}`,
     );
   }
 
@@ -156,6 +159,22 @@ async function verify(c: CorridorCase, meta: DvnMeta): Promise<void> {
       "engine emits NO CRITICAL on this corridor",
       !onRoute.some((f) => f.severity === "CRITICAL"),
       `riskLevel=${riskLevel}`,
+    );
+  }
+
+  // Pin a true positive in place. The `no*` assertions above stop false positives coming
+  // back; this stops a real finding being silently rounded away by a future rule change.
+  if (e.requireFinding) {
+    const { check: want, severity, detailMatches } = e.requireFinding;
+    const hit = onRoute.find((f) => f.check === want);
+    const sevOk = !severity || hit?.severity === severity;
+    const detailOk = !detailMatches || !!hit?.detail.toLowerCase().includes(detailMatches.toLowerCase());
+    check(
+      `engine emits "${want}"${severity ? ` at ${severity}` : ""}${detailMatches ? `, saying "${detailMatches}"` : ""}`,
+      !!hit && sevOk && detailOk,
+      hit
+        ? `got [${hit.severity}] ${hit.check}${detailOk ? "" : " — detail does not mention it"}`
+        : `NOT EMITTED. findings on this corridor: ${onRoute.map((f) => `[${f.severity}] ${f.check}`).join(" | ") || "none"}`,
     );
   }
 }

@@ -1,4 +1,4 @@
-import type { OftSnapshot, RouteSnapshot, UlnSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, Evidence, Liveness, PreflightResult, CustodyDeclaration } from "../types.js";
+import type { OftSnapshot, RouteSnapshot, UlnSnapshot, DriftResult, Finding, RiskLevel, TransactionIntent, Severity, Evidence, Sendability, PreflightResult, CustodyDeclaration } from "../types.js";
 import { computeScore } from "./score.js";
 import { loadDvnMeta, resolveDvn, isDvnDeprecated, isDeadDvn, isSelfDvn } from "./lz-config.js";
 import { getCustodyDeclaration } from "./custody.js";
@@ -82,18 +82,28 @@ function chainKeyOf(snap: OftSnapshot): string | null {
 //      sides were identical in identity space and nothing was ever blocked. A genuine
 //      block (receiver requires a DVN the sender does not pay) still fires HIGH.
 //
-//   3. LIVENESS BOUNDS EVERY CLAIM. Teams pre-wire destination chains months before they
-//      open them, so a corridor can carry a full config no message has ever crossed. A
-//      CRITICAL about money that cannot move is noise. quoteSend() now gates severity
-//      (see capByLiveness). A DORMANT corridor caps at MEDIUM and pops to its true
-//      severity the day it goes live; UNKNOWN never caps, so an RPC failure can never
+//   3. SENDABILITY BOUNDS EVERY CLAIM. Teams pre-wire destination chains months before
+//      they open them, so a corridor can carry a full config no message has ever crossed.
+//      A CRITICAL about money that cannot even be sent is noise. quoteSend() now gates
+//      severity (see capBySendability). An UNSENDABLE corridor caps at MEDIUM and pops to
+//      its true severity the day it opens; UNKNOWN never caps, so an RPC failure can never
 //      suppress a real finding.
+//
+//      ⚠️ SENDABLE IS NOT DELIVERABLE. quoteSend is priced on the SOURCE chain and knows
+//      nothing about the destination's receive config, so it proves only that a corridor
+//      ACCEPTS a send. A corridor can be SENDABLE and permanently undeliverable — send
+//      confirmations below the destination's requirement, a destination requiring a DVN
+//      the sender never pays, a destination whose required DVN set is a dead placeholder.
+//      In all three, tokens leave the source and never arrive. That is a FUNDS TRAP, and
+//      it is strictly worse than an unsendable route, which at least declines the money.
+//      Sendability therefore does two jobs: it caps claims on corridors nothing can enter,
+//      and it is what distinguishes a harmless dormant misconfiguration from a live trap.
 //
 // The through-line, and the same lesson as the evidence law: the engine was asserting a
 // risk it had not measured. It measured the send side and claimed the receive side; it
 // measured a set difference and claimed a permanent block; it measured a config and
 // claimed value was at risk without checking that value could move at all.
-export const RULES_VERSION = "4.0.0";
+export const RULES_VERSION = "4.1.0";
 
 // ── The evidence law ─────────────────────────────────────────────────────────
 // CRITICAL and HIGH require directly observed evidence. An inferred finding caps at
@@ -121,33 +131,142 @@ export function capByEvidence(f: Finding): Finding {
   return f;
 }
 
-// ── The liveness law ─────────────────────────────────────────────────────────
-// A security claim about money that cannot move is not a security claim. Teams pre-wire
-// destination chains long before they open them, so a corridor can carry a fully-formed
-// config that no message has ever traversed — and a CRITICAL on it is noise that costs
-// exactly as much credibility as a false one.
+// ── The sendability law ──────────────────────────────────────────────────────
+// A security claim about money that cannot even be SENT is not a security claim. Teams
+// pre-wire destination chains long before they open them, so a corridor can carry a
+// fully-formed config that no message has ever traversed — and a CRITICAL on it is noise
+// that costs exactly as much credibility as a false one.
 //
-// DORMANT therefore caps route findings at MEDIUM: still recorded, still in the digest,
+// UNSENDABLE therefore caps route findings at MEDIUM: still recorded, still in the digest,
 // never paged. The cap is not suppression — it lifts by itself the day quoteSend starts
 // succeeding, so a dangerous pre-wired corridor pops to its true severity the moment it
 // opens, which is the moment it starts mattering.
 //
-// UNKNOWN must NEVER cap. UNKNOWN means the probe failed, not that the corridor is dead;
+// UNKNOWN must NEVER cap. UNKNOWN means the probe failed, not that the corridor is shut;
 // letting an RPC hiccup downgrade a CRITICAL would turn Sentinel into a machine for
 // suppressing findings under load — a worse failure than the one it replaces.
-const LIVENESS_CEILING: Record<Liveness, Severity> = {
-  LIVE: "CRITICAL",     // no cap
-  DORMANT: "MEDIUM",    // nothing can move through it
-  UNKNOWN: "CRITICAL",  // we failed to ask — never hold that against the finding
+//
+// ⚠️ AND SENDABLE NEVER IMPLIES DELIVERABLE. This ceiling is a CAP, never a licence: it may
+// only weaken a finding on a corridor nothing can enter. It must never be read as evidence
+// that a SENDABLE corridor is healthy. A corridor that accepts a send and then never
+// delivers is a funds trap and is the worst state of all (see the receive-side rules).
+const SENDABILITY_CEILING: Record<Sendability, Severity> = {
+  SENDABLE: "CRITICAL",   // no cap — and no credit either
+  UNSENDABLE: "MEDIUM",   // nothing can even enter this corridor
+  UNKNOWN: "CRITICAL",    // we failed to ask — never hold that against the finding
 };
 
-/** Clamp a route finding's severity to what its corridor's liveness can support. */
-export function capByLiveness(f: Finding, liveness: Liveness): Finding {
-  const ceiling = LIVENESS_CEILING[liveness];
+/** Clamp a route finding's severity to what its corridor's sendability can support. */
+export function capBySendability(f: Finding, sendability: Sendability): Finding {
+  const ceiling = SENDABILITY_CEILING[sendability];
   if (SEVERITY_RANK[f.severity] < SEVERITY_RANK[ceiling]) {
     return { ...f, severity: ceiling };
   }
   return f;
+}
+
+// ── The delivery law ─────────────────────────────────────────────────────────
+// THE lesson of this project, and it took three false findings to learn it:
+//
+//     the engine kept measuring a CONFIG property and asserting a CONSEQUENCE.
+//
+// It saw a send/receive DVN set difference and said "permanently blocked" — the corridor
+// was delivering. It saw a confirmation asymmetry and said "permanently blocked" — the
+// corridor had delivered every message ever sent through it. It saw a dead receive-side
+// DVN set and said "funds are stranded" — nobody had ever sent a message into it.
+//
+// The evidence law did not catch any of these, because it governs how confidently a rule
+// may SPEAK, not whether the thing it speaks about was ever OBSERVED. A rule earned
+// `observed` by observing the config, then spent it asserting the outcome.
+//
+// So delivery is now counted, never inferred. `outboundNonce` says what left;
+// `inboundNonce` says what landed. No rule may claim a message does not get through
+// without them — and the two laws compose: an unmeasured block claim is `inferred`, which
+// the evidence law already caps at MEDIUM. A false CRITICAL becomes structurally
+// impossible for this whole family of findings, rather than merely discouraged.
+export type DeliveryState =
+  | "STRANDING"   // sent > delivered: messages left and did not land. Value is stuck.
+  | "DELIVERING"  // everything sent has landed — and the last send happened under the
+                  // config we score (or we could not rule it out; the note says which).
+  | "UNTESTED"    // the corridor has delivered before, but the config CHANGED after the
+                  // last send (verified by archival read): nothing has ever crossed
+                  // under what we score. Delivery history is stale evidence here.
+  | "UNUSED"      // nothing has ever been sent. Nobody is exposed yet.
+  | "UNKNOWN";    // not measured. Never assume.
+
+export function deliveryState(route: RouteSnapshot): DeliveryState {
+  const d = route.delivery;
+  if (!d || d.delivered === null) return "UNKNOWN";
+  if (d.sent === 0) return "UNUSED";
+  if (d.sent > d.delivered) return "STRANDING";
+  return d.sentUnderCurrentConfig === false ? "UNTESTED" : "DELIVERING";
+}
+
+/**
+ * THE DELIVERY LAW (corrected 2026-07-15; the first version of this function encoded
+ * the opposite and shipped a downgrade):
+ *
+ *   Delivery evidence is HISTORICAL; config is CURRENT. Nonces can never SOFTEN a
+ *   config-derived block claim. They can only ESCALATE it (funds observably stranded)
+ *   or CONTRADICT it (messages crossing under the exact config that says they cannot —
+ *   which means one of our reads is wrong: a sensor-integrity flag, not a downgrade).
+ *
+ * Why softening was wrong, empirically: a live corridor showed sent == delivered, which
+ * the old law read as "the corridor works despite the config → MEDIUM". Every delivery
+ * predated the config change by more than a year. Nothing had ever crossed under the
+ * config we scored — and the first message sent after the change is BLOCKED on
+ * LayerZero Scan to this day. `sent == delivered` was stale evidence, and the
+ * downgrade it bought was a false MEDIUM on a real HIGH.
+ *
+ * So: severity comes from CONFIG + DOCS and is passed in by the rule; delivery supplies
+ * EXPOSURE, spoken in the note. The finding's evidence is `observed` in every state —
+ * what is observed is the misconfiguration itself, on-chain, against LZ's own docs.
+ */
+export function blockClaim(state: DeliveryState, d: RouteSnapshot["delivery"], configSeverity: Severity): {
+  severity: Severity; evidence: Evidence; note: string;
+} {
+  switch (state) {
+    case "STRANDING": {
+      const stuck = (d!.sent - d!.delivered!);
+      return {
+        severity: configSeverity, evidence: "observed",
+        note: `${stuck} message${stuck === 1 ? "" : "s"} sent that the destination never accepted (${d!.sent} sent, ${d!.delivered} delivered): value is observably stranded`,
+      };
+    }
+    case "DELIVERING":
+      if (d!.sentUnderCurrentConfig === true) {
+        // Verified contradiction: the last send crossed under the exact config we read
+        // as blocking. The world wins — but that impeaches our READ, not the law. Flag
+        // it for sensor investigation; do not downgrade (a wrong read could just as
+        // easily be hiding something worse).
+        return {
+          severity: configSeverity, evidence: "observed",
+          note: `⚠ SENSOR CONTRADICTION: messages are crossing under the exact config we read as blocking (${d!.sent} sent, ${d!.delivered} delivered, last send under the current config) — one of our reads is wrong; investigate the pipeline before trusting either claim`,
+        };
+      }
+      // Delivery history exists, but whether ANY of it happened under the CURRENT config
+      // is unverified (the archival discriminator has not run here). History must not
+      // soften a claim about the present — that is exactly the stale-evidence mistake.
+      return {
+        severity: configSeverity, evidence: "observed",
+        note: `the corridor has delivered before (${d!.sent} sent, ${d!.delivered} delivered), but whether any message has crossed under the CURRENT config is unverified — past delivery does not clear a present misconfiguration`,
+      };
+    case "UNTESTED":
+      return {
+        severity: configSeverity, evidence: "observed",
+        note: `the corridor's delivery history (${d!.sent} sent, ${d!.delivered} delivered) all predates the current config (verified by archival read): nothing has ever crossed under what we score — the next send is the experiment`,
+      };
+    case "UNUSED":
+      return {
+        severity: configSeverity, evidence: "observed",
+        note: "no message has ever been sent through this corridor — no funds exposed yet, and the first send is the one that strands",
+      };
+    case "UNKNOWN":
+      return {
+        severity: configSeverity, evidence: "observed",
+        note: "delivery accounting unavailable for this corridor; the claim rests on the observed config and LZ's documented behaviour alone",
+      };
+  }
 }
 
 /** How many distinct verifiers must attest before this side accepts a message.
@@ -447,44 +566,94 @@ export async function assessSnapshot(
     }
 
     const dstChainKey = route.chainKey; // destination chainKey — for DVN name lookup on dst
-    const liveness: Liveness = route.liveness ?? "UNKNOWN";
+    const sendability: Sendability = route.sendability ?? "UNKNOWN";
 
-    // Route-scoped SECURITY findings are bounded by whether value can move through this
-    // corridor at all (see the liveness law). Sensor-integrity findings — RPC Source
+    // Route-scoped SECURITY findings are bounded by whether the corridor will accept a
+    // send at all (see the sendability law). Sensor-integrity findings — RPC Source
     // Conflict, ULN Unreadable — are deliberately NOT routed through this: they say our
     // reading is untrustworthy, and that is true whether or not the corridor carries
     // traffic. Push those directly.
     const pushRoute = (f: Finding): Finding => {
-      const capped = capByLiveness(f, liveness);
+      const capped = capBySendability(f, sendability);
       if (capped.severity !== f.severity) f.severity = capped.severity;
       findings.push(f);
       return f;
     };
 
     const recvUln = route.receiveUln;
+    // What actually crossed. Gates every claim below that messages do not get through.
+    const delivery = deliveryState(route);
 
-    // ── Dead / unconfigured pathway — RECEIVE side ───────────────────────────
-    // Mirror of the send-side Dead Pathway rule above, and only reachable from 4.0.0,
-    // because scoring the receive side is what first exposes us to a dead receive config.
+    // ── Half-wired corridor: the destination does not peer back ──────────────
+    // setPeer is one-directional. quoteSend only reads the SOURCE's peer mapping, so a
+    // corridor with no peer back still quotes, still debits the sender, still emits — and
+    // then lzReceive reverts on _getPeerOrRevert, forever. LZ files this under
+    // "NotInitializable" / Blocked. Teams wire chains one direction at a time, which makes
+    // this the most likely trap in the fleet and the one no other check can see.
+    // peerSymmetric === null means we could not read it: say nothing.
+    if (route.peerSymmetric === false) {
+      const c = blockClaim(delivery, route.delivery, "HIGH");
+      const f: Finding = {
+        severity: c.severity,
+        evidence: c.evidence,
+        check: "Half-Wired Corridor",
+        detail: `${route.chainName}: this OFT peers to the destination, but the destination does NOT peer back (${route.reversePeer ? `it points at ${route.reversePeer.slice(0, 10)}…` : "no peer set"}). The corridor still accepts sends — quoteSend only reads the source's own peer mapping — but lzReceive reverts on the destination and can never succeed. ${c.note}.`,
+      };
+      pushRoute(f);
+      addTIS("fix_peer_asymmetry", route.chainName, {
+        intent: "fix_peer_asymmetry",
+        action: "Call setPeer on the DESTINATION so it points back at this OFT (or unset the source peer to close the pathway)",
+        currentState: "Source peers to the destination; the destination does not peer back",
+        targetState: "Both sides peer to each other, or neither does",
+        reason: "A one-directional peer lets the corridor accept sends it can never deliver",
+        severity: c.severity,
+      }, f);
+      continue;
+    }
+
+    // ── Dead DVN set on the RECEIVE side ─────────────────────────────────────
+    // Only reachable from 4.0.0: scoring the receive side is what first exposes us to a
+    // dead RECEIVE config, which the send-side Dead Pathway rule above never guarded.
     //
     // A destination whose required DVN set is entirely an LZ Dead DVN placeholder can
-    // never verify anything, so the route is unconfigured and message-blocked — NOT a
-    // live 1-of-1. A dead DVN cannot be compromised into forging a message; it cannot
-    // attest at all. Scoring it as the Kelp pattern would assert a forgery risk the
-    // config does not support, which is precisely the class of false CRITICAL this
-    // release exists to remove — so it would be a poor joke to introduce a new one.
+    // never verify anything. That is NOT a live 1-of-1: a dead DVN cannot be compromised
+    // into forging a message, because it cannot attest at all. Scoring it as the Kelp
+    // pattern asserts a forgery risk the config does not support — precisely the class of
+    // false CRITICAL this release exists to remove, so introducing a new one would be a
+    // poor joke. (Caught by A/B-ing 4.0.0 against 3.0.0 over the live fleet, which
+    // surfaced it as a NEW CRITICAL. Every unit test passed; only the fleet diff found it.)
     //
-    // Caught by A/B-ing 4.0.0 against 3.0.0 over the whole fleet, which surfaced it as a
-    // NEW CRITICAL on a real asset. Every unit test passed; only the diff against live
-    // data found it. That is the entire argument for running the A/B before shipping.
+    // ⚠️ BUT IT IS NOT THE HARMLESS TWIN OF THE SEND-SIDE RULE, and treating it as one was
+    // this rule's second bug. The two are asymmetric, and sendability is what separates them:
+    //
+    //   send side dead    → quoteSend REVERTS → nothing can enter → genuinely harmless
+    //   receive side dead → quoteSend SUCCEEDS → the corridor still ACCEPTS SENDS, still
+    //                       debits the user, still emits the message — and the destination
+    //                       can never verify it. Tokens leave and never arrive.
+    //
+    // quoteSend is priced on the source chain and cannot see the destination's config, so
+    // it happily quotes a route that will strand every token sent through it. That is a
+    // FUNDS TRAP: strictly worse than a dead route, which at least declines the money. It
+    // gets HIGH, and the detail says plainly where the funds go, so no reader can mistake
+    // it for an advisory. Only when the corridor also refuses sends is it the quiet LOW.
     if (recvUln && recvUln.requiredDVNs.length > 0 &&
         recvUln.requiredDVNs.every((a) => isDeadDvn(a, dstChainKey, dvnMeta))) {
-      pushRoute({
-        severity: "LOW",
-        evidence: "observed",
-        check: "Dead Pathway",
-        detail: `${route.chainName}: the DESTINATION's required DVN set is entirely an LZ Dead DVN placeholder — the receive side can verify nothing, so messages are blocked and cannot be delivered (funds bridged here would be stuck until the destination OApp sets real DVNs). Not a live 1-of-1: a dead DVN cannot attest, so it cannot be compromised to forge.`,
-      });
+      const c = blockClaim(delivery, route.delivery, "HIGH");
+      const f: Finding = {
+        severity: c.severity,
+        evidence: c.evidence,
+        check: "Dead Receive DVN",
+        detail: `${route.chainName}: the DESTINATION's required DVN set is entirely an LZ Dead DVN placeholder, so the receive side can verify nothing — and the corridor still accepts sends (quoteSend prices one). ${c.note}. Not a forgeable 1-of-1: a dead DVN cannot attest at all, so it cannot be compromised to forge.`,
+      };
+      pushRoute(f);
+      addTIS("resolve_dead_receive_dvn", route.chainName, {
+        intent: "resolve_dead_receive_dvn",
+        action: "Set real DVNs on the destination's receive config, or close the pathway so it stops accepting sends",
+        currentState: "Destination requires only an LZ Dead DVN placeholder, yet the corridor still accepts sends",
+        targetState: "Destination verifies on real DVNs the sender pays, or the corridor refuses sends",
+        reason: "The corridor debits the sender and emits a message the destination can never verify",
+        severity: c.severity,
+      }, f);
       continue;
     }
 
@@ -525,7 +694,7 @@ export async function assessSnapshot(
       //     sender pays ≤1 DVN  ⟹  (corridor is dead)  OR  (boundary is a real 1-of-1)
       //
       // There is no third branch, and the dead branch is not the evidence law's job — it
-      // is exactly what capByLiveness handles. So this stays `observed`, and the Kelp
+      // is exactly what capBySendability handles. So this stays `observed`, and the Kelp
       // 1-of-1 keeps firing CRITICAL on a corridor we cannot see the far side of.
       //
       // Note this keys on how many DVNs are PAID, not the send-side effective count. A
@@ -581,7 +750,7 @@ export async function assessSnapshot(
         action: `Add a third independent required DVN to ${fixTarget}`,
         currentState: `2 effective DVNs (${dvnNames}): one compromise breaks the quorum`,
         targetState: "≥3 independent verifiers in the accepting quorum",
-        reason: "2-of-2 DVN config means a single DVN compromise or liveness failure halts all messages",
+        reason: "2-of-2 DVN config means a single DVN compromise or outage halts all messages",
         severity: "MEDIUM",
       }, f);
     }
@@ -671,16 +840,20 @@ export async function assessSnapshot(
           : recvReq.join(", ");
 
         if (d.blocked) {
-          // A real permanent block: the destination demands a verifier the sender does
-          // not pay, so its quorum can never be met and no message can ever land.
+          // The destination demands a verifier the sender does not pay, so on paper its
+          // quorum can never be met. On paper. Whether messages ACTUALLY fail to land is a
+          // measurement, not a deduction — see the delivery law. This rule shipped a HIGH
+          // "permanently blocked" on a corridor that was delivering; it does not get to
+          // make that claim again without counting.
           const why = d.missingRequired.length
             ? `destination requires [${d.missingRequired.join(", ")}], which the sender does not pay`
             : `sender covers ${d.optionalShortfall} too few of the destination's optional DVNs (needs ${recvUln.optionalDVNThreshold})`;
+          const c = blockClaim(delivery, route.delivery, "HIGH");
           const f: Finding = {
-            severity: "HIGH",
-            evidence: "observed",
+            severity: c.severity,
+            evidence: c.evidence,
             check: "Undeliverable Route",
-            detail: `${route.chainName}: sender pays [${paidList}] but the destination accepts on [${recvList}] — ${why}. Messages cannot be delivered.`,
+            detail: `${route.chainName}: sender pays [${paidList}] but the destination accepts on [${recvList}] — ${why}. ${c.note}.`,
           };
           pushRoute(f);
           addTIS(`resolve_dvn_mismatch`, route.chainName, {
@@ -688,8 +861,8 @@ export async function assessSnapshot(
             action: "Add the destination's required DVNs to the send config (or drop them from the receive config)",
             currentState: `Sender pays [${paidList}]; destination accepts on [${recvList}]`,
             targetState: "Sender pays for every DVN the destination requires",
-            reason: "The destination's verification quorum can never be met, so no message can be delivered",
-            severity: "HIGH",
+            reason: "The destination's verification quorum cannot be met by the DVNs the sender pays",
+            severity: c.severity,
           }, f);
         } else if (d.overpaid.length > 0) {
           // Non-blocking mismatch. Messages flow — the sender simply pays verifiers the
@@ -777,24 +950,43 @@ export async function assessSnapshot(
       }, f);
     }
 
-    // ── Confirmation mismatch (send vs receive) ──────────────────────────────
-    // If the destination chain requires more confirmations than the source sends,
-    // the threshold is never met → permanent message block on that corridor.
+    // ── Block confirmation mismatch (send < receive required) ────────────────
+    // Named for LZ's own section: docs.layerzero.network /v2/developers/evm/configuration/
+    // dvn-executor-config#block-confirmation-mismatch — "Messages will be blocked until
+    // either the sending OApp has increased the outbound block confirmations, or the
+    // receiving OApp decreases the inbound block confirmation threshold." The FAQ and the
+    // debugging-messages page both list this mismatch as a cause of the "Blocked" status:
+    // "Outbound confirmations must be ≥ inbound confirmations."
+    //
+    // History, because this rule has been wrong in BOTH directions:
+    //   v1 said "permanently blocked" off two integers with no delivery measurement.
+    //   v2 (never shipped) DOWNGRADED it to MEDIUM because `sent == delivered` — built on
+    //   the DVN-implementer guide (build-dvns step 4: the DVN waits per the RECEIVE
+    //   config), which is not the page that governs OApp risk, and on delivery history
+    //   that entirely predated the config change (every send landed over a year before
+    //   the raised receive-confirmation config existed).
+    // The empirical settle: the first message sent AFTER that config change, on a
+    // sibling corridor with the same asymmetry, sits BLOCKED on LayerZero Scan —
+    // months old when checked.
+    // Whatever an individual DVN implementation waits for, the protocol blocks the
+    // message. Docs are the oracle; on-chain state is the check; mechanism intuition is
+    // neither. This is HIGH per the docs, and delivery evidence may only escalate it.
     if (route.uln && route.receiveUln && route.receiveUln.confirmations > route.uln.confirmations) {
+      const c = blockClaim(delivery, route.delivery, "HIGH");
       const f: Finding = {
-        severity: "HIGH",
-        evidence: "observed",
-        check: "Confirmation Mismatch",
-        detail: `${route.chainName}: send confirmations (${route.uln.confirmations}) < receive required (${route.receiveUln.confirmations}). Messages will be permanently blocked.`,
+        severity: c.severity,
+        evidence: c.evidence,
+        check: "Block Confirmation Mismatch",
+        detail: `${route.chainName}: send confirmations (${route.uln.confirmations}) < receive required (${route.receiveUln.confirmations}). LZ integrator docs ("Block Confirmation Mismatch", dvn-executor-config): messages will be blocked until the outbound confirmations are raised or the inbound threshold is lowered. ${c.note}.`,
       };
       pushRoute(f);
       addTIS(`resolve_confirmation_mismatch`, route.chainName, {
         intent: "resolve_confirmation_mismatch",
-        action: `Raise send confirmations to match the destination's required ${route.receiveUln.confirmations}`,
+        action: `Pin confirmations explicitly on BOTH sides; raise send confirmations to at least the destination's ${route.receiveUln.confirmations}`,
         currentState: `Send ${route.uln.confirmations} < receive required ${route.receiveUln.confirmations}`,
-        targetState: `Send confirmations ≥ ${route.receiveUln.confirmations}`,
-        reason: "Send confirmations below receive threshold permanently blocks message delivery",
-        severity: "HIGH",
+        targetState: `Send confirmations ≥ ${route.receiveUln.confirmations}, pinned on both sides`,
+        reason: "Send confirmations below the receive threshold block delivery per LZ docs — messages strand until the config is corrected",
+        severity: c.severity,
       }, f);
     }
   }

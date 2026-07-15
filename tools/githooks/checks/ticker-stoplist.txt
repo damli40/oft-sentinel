@@ -1,0 +1,23 @@
+# Engine vocabulary excluded from dynamic ticker patterns (committable — nothing confidential).
+# One word per line. Extend when the confidentiality lint false-positives on a generic word.
+CRITICAL
+HIGH
+MEDIUM
+LOW
+PASS
+UNKNOWN
+SENDABLE
+UNSENDABLE
+DELIVERING
+STRANDING
+UNUSED
+UNTESTED
+AT_RISK
+DEMO
+DVN
+ULN
+OFT
+OAPP
+EID
+RPC
+EVM

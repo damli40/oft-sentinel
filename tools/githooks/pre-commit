@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Sentinel pre-commit. Deterministic checks only — no LLM, no autofix.
+# Bypass (--no-verify) is NEVER acceptable for confidentiality/guardrail failures.
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+for check in "$DIR"/checks/*.sh; do
+  [ -x "$check" ] || continue
+  "$check" || { echo "pre-commit: BLOCKED by $(basename "$check")"; exit 1; }
+done

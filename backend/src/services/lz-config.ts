@@ -2,14 +2,15 @@ import { createPublicClient, http, getAddress, keccak256, toHex, encodeFunctionD
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
-import type { ChainRef, Liveness, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
+import type { ChainRef, Sendability, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
 import { getChainRefByKey, normalizeProvider } from "./chain-registry.js";
+import { getBlockClaimVerification, stampDelivery } from "./block-claim-verifications.js";
 
 // LayerZero V2 endpoint — same address on every EVM chain.
-const ENDPOINT = "0x1a44076050125825900e736c501f859c50fE728c" as Address;
+export const ENDPOINT = "0x1a44076050125825900e736c501f859c50fE728c" as Address;
 
 // 4-byte selectors, mirrored from fetch_oft_config.py (the audited source of truth).
-const SEL = {
+export const SEL = {
   getSendLibrary:      "0xb96a277f", // (oapp,eid) → address
   isDefaultSendLibrary:"0xdc93c8a2", // (oapp,eid) → bool
   getReceiveLibrary:   "0x402f8468", // (oapp,eid) → (address lib, bool isDefault)
@@ -21,15 +22,23 @@ const SEL = {
   decimals:            "0x313ce567", // () → uint8
 } as const;
 
-// ── Liveness probe (quoteSend) ───────────────────────────────────────────────
-// The ONLY bridgeability signal that survived on-chain verification. outboundNonce does
-// NOT work and must not be resurrected: a bricked corridor (weETH→Zircuit) reads nonce 2
-// while a live one (weETH→Ethereum) reads nonce 0.
+// ── Sendability probe (quoteSend) ────────────────────────────────────────────
+// Asks the endpoint to price a real message against the live send library, ULN config
+// and peer. A fee comes back only if the corridor will ACCEPT A SEND.
 //
-// quoteSend() asks the endpoint to price a real message against the live send library,
-// ULN config and peer. It can only return a fee if the corridor is wired end to end, so
-// a successful quote is proof that value can move; a revert is the chain refusing to
-// price the message.
+// ⚠️ IT PROVES SENDABILITY, NOT DELIVERABILITY, and conflating the two is a trap this
+// codebase has already fallen into once. quoteSend is evaluated entirely on the SOURCE
+// chain and has no knowledge of the destination's receive config. So a corridor whose
+// send confirmations fall below the destination's requirement, or whose destination
+// demands a DVN the sender never pays, or whose destination required-DVN set is a dead
+// placeholder, will quote happily — and then strand every token sent through it. Tokens
+// leave the source and never arrive, which is strictly WORSE than a corridor that
+// refuses the send outright: an unsendable route at least declines the money.
+// Deliverability is decided by the receive-side rules in drift.ts and must stay a
+// separate axis.
+//
+// outboundNonce does NOT work as a substitute and must not be resurrected: a bricked
+// corridor (weETH→Zircuit) reads nonce 2 while a working one (weETH→Ethereum) reads 0.
 const QUOTE_SEND_ABI = [{
   name: "quoteSend",
   type: "function",
@@ -54,7 +63,7 @@ const QUOTE_SEND_ABI = [{
 
 // Type-3 options carrying an explicit lzReceive gas floor. Passed on every probe so the
 // quote does NOT depend on the OFT having called setEnforcedOptions() — without this,
-// every OFT missing enforced options would quote-revert and read as a false DORMANT,
+// every OFT missing enforced options would quote-revert and read as a false UNSENDABLE,
 // silently capping the severity of the very assets most likely to be misconfigured.
 const LZ_RECEIVE_OPTION = concatHex([
   "0x0003",                            // options type 3
@@ -64,11 +73,23 @@ const LZ_RECEIVE_OPTION = concatHex([
   pad(toHex(200_000n), { size: 16 }),  // gas, uint128
 ]);
 
-/** A revert is the chain's verdict ("cannot send"); anything else is our own failure to
- *  ask. Only a clear revert may return DORMANT — a transport error, rate limit or
- *  timeout must fall through to UNKNOWN, which never caps severity. When in doubt we
- *  say UNKNOWN: a misread here suppresses a CRITICAL, so the bias must be toward
- *  "we don't know" rather than "nothing can move". */
+// ── Delivery accounting (outboundNonce / inboundNonce) ───────────────────────
+// The measurement that stops the engine inferring consequences it never observed. Config
+// says what SHOULD happen; these say what DID. `sent - delivered` is stranded value.
+const NONCE_ABI = [
+  { name: "outboundNonce", type: "function", stateMutability: "view",
+    inputs: [{ name: "_sender", type: "address" }, { name: "_dstEid", type: "uint32" }, { name: "_receiver", type: "bytes32" }],
+    outputs: [{ type: "uint64" }] },
+  { name: "inboundNonce", type: "function", stateMutability: "view",
+    inputs: [{ name: "_receiver", type: "address" }, { name: "_srcEid", type: "uint32" }, { name: "_sender", type: "bytes32" }],
+    outputs: [{ type: "uint64" }] },
+] as const;
+
+/** A revert is the chain's verdict ("this corridor will not accept a send"); anything
+ *  else is our own failure to ask. Only a clear revert may return UNSENDABLE — a transport
+ *  error, rate limit or timeout must fall through to UNKNOWN, which never caps severity.
+ *  When in doubt, say UNKNOWN: a misread here suppresses a CRITICAL, so the bias must be
+ *  toward "we don't know" rather than "nothing can be sent". */
 function isRevert(e: any): boolean {
   const s = `${e?.name ?? ""} ${e?.shortMessage ?? ""} ${e?.details ?? ""} ${e?.message ?? ""}`.toLowerCase();
   if (/timeout|timed out|fetch failed|socket|econn|network|rate limit|too many requests|429|50[0234]/.test(s)) {
@@ -77,40 +98,40 @@ function isRevert(e: any): boolean {
   return /revert|invalid opcode|out of gas|contractfunction/.test(s);
 }
 
-// ── Liveness cache: sticky LIVE, never sticky DORMANT ────────────────────────
-// The probe costs one eth_call per corridor per cycle — ~3.5k extra calls across the
-// fleet every 5 minutes, which is real money against an RPC budget.
+// ── Sendability cache: sticky SENDABLE, never sticky UNSENDABLE ──────────────
+// The probe costs one eth_call per corridor per cycle, which is real money against an
+// RPC budget across the whole fleet.
 //
-// The asymmetry that makes caching safe: caching LIVE can only ever cause us to NOT cap a
-// severity, which is the harmless direction (we never suppress a finding). Caching DORMANT
-// could hold a cap in place after a corridor opens, silently muting a CRITICAL on a route
-// that now moves value — the one failure this whole design exists to prevent.
+// The asymmetry that makes caching safe: caching SENDABLE can only ever cause us to NOT
+// cap a severity, which is the harmless direction — we never suppress a finding. Caching
+// UNSENDABLE could hold a cap in place after a corridor opens, silently muting a CRITICAL
+// on a route that now takes real value: the one failure this design exists to prevent.
 //
-// So: LIVE is remembered for 24h, DORMANT and UNKNOWN are re-probed every single cycle.
-// Most corridors are live, so nearly all the cost is amortized away, and the promise that
-// "the cap lifts the day the corridor goes live" is honoured on the very next poll.
-const LIVENESS_TTL = 24 * 60 * 60_000;
-const livenessCache = new Map<string, number>(); // key → time LIVE was observed
+// So SENDABLE is remembered for 24h; UNSENDABLE and UNKNOWN are re-probed every cycle.
+// Most corridors are sendable, so nearly all the cost amortizes away, and the promise that
+// "the cap lifts the day the corridor opens" is honoured on the very next poll.
+const SENDABILITY_TTL = 24 * 60 * 60_000;
+const sendabilityCache = new Map<string, number>(); // key → time SENDABLE was observed
 
-export function _resetLivenessCache(): void {
-  livenessCache.clear();
+export function _resetSendabilityCache(): void {
+  sendabilityCache.clear();
 }
 
-/** Can a message actually be sent through this corridor right now? */
-async function probeLiveness(
+/** Will this corridor accept a send right now? (NOT: will the message be delivered.) */
+async function probeSendability(
   clients: RpcClient[],
   oft: Address,
   dstEid: number,
   peerAddress: string | null,
   amountLD: bigint,
   chainId: number,
-): Promise<Liveness> {
+): Promise<Sendability> {
   // No peer = nothing to send to. This is a config fact, not a probe failure.
-  if (!peerAddress) return "DORMANT";
+  if (!peerAddress) return "UNSENDABLE";
 
   const cacheKey = `${chainId}:${oft.toLowerCase()}:${dstEid}`;
-  const seenLiveAt = livenessCache.get(cacheKey);
-  if (seenLiveAt && Date.now() - seenLiveAt < LIVENESS_TTL) return "LIVE";
+  const seenSendableAt = sendabilityCache.get(cacheKey);
+  if (seenSendableAt && Date.now() - seenSendableAt < SENDABILITY_TTL) return "SENDABLE";
 
   let data: `0x${string}`;
   try {
@@ -136,8 +157,8 @@ async function probeLiveness(
     try {
       const res = await rawCall(client, oft, data);
       if (res && res !== "0x") {
-        livenessCache.set(cacheKey, Date.now());
-        return "LIVE";
+        sendabilityCache.set(cacheKey, Date.now());
+        return "SENDABLE";
       }
       // Empty return from a `view` that always returns data = this RPC misbehaving,
       // not a verdict. Try the next one.
@@ -146,7 +167,7 @@ async function probeLiveness(
       // transport failure: try the next RPC
     }
   }
-  return sawRevert ? "DORMANT" : "UNKNOWN"; // deliberately not cached — see above
+  return sawRevert ? "UNSENDABLE" : "UNKNOWN"; // deliberately not cached — see above
 }
 
 // ── Deployments-sourced EID map ───────────────────────────────────────────────
@@ -612,7 +633,7 @@ function decodeBytesNonEmpty(raw: string): boolean | null {
   return uintAt(h, off) > 0;
 }
 
-function decodeUlnConfig(raw: string): UlnSnapshot | null {
+export function decodeUlnConfig(raw: string): UlnSnapshot | null {
   if (!raw || raw === "0x") return null;
   const h = raw.slice(2);
   if (h.length < 192) return null;
@@ -963,9 +984,10 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       // Use the destination chain's own endpoint address (varies by chain).
       const dstEndpoint = (chainInfo?.endpoint ?? ENDPOINT) as Address;
       if (peerAddr && dstRpc) {
+        const peerAddrChecked = getAddress(peerAddr) as Address;
+        const dstClient = makeClient(dstRpc);
+
         try {
-          const dstClient = makeClient(dstRpc);
-          const peerAddrChecked = getAddress(peerAddr) as Address;
           // Reverse direction: read the peer's receive config for messages coming
           // FROM this source chain — so the source EID here is chain.eid.
           const [recvLib] = decodeAddressBool(
@@ -977,13 +999,60 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
             );
           }
         } catch { /* receiveUln stays null */ }
+
+        // ── Reverse peer: is this corridor wired in BOTH directions? ─────────
+        // setPeer is one-directional. If the source peers to the destination but the
+        // destination does not peer back, quoteSend still succeeds (it only reads the
+        // source's own peer mapping), tokens still leave — and lzReceive reverts on
+        // _getPeerOrRevert forever. LZ documents this as the "NotInitializable" /
+        // Blocked class. Teams wire chains one direction at a time, so this is
+        // predicted to be common, and it is invisible to every other check we run.
+        try {
+          const back = await rawCall(dstClient, peerAddrChecked, SEL.peers + padU32(chain.eid));
+          if (back && back !== "0x") {
+            const backAddr = BigInt(back) === 0n ? null : getAddress("0x" + back.slice(-40));
+            route.reversePeer = backAddr;
+            route.peerSymmetric = backAddr !== null && backAddr.toLowerCase() === oftAddr.toLowerCase();
+          }
+        } catch { /* peerSymmetric stays null — unread, never assume unset */ }
+
+        // ── Delivery accounting: what actually crossed ───────────────────────
+        // sent (source outboundNonce) vs delivered (destination inboundNonce). No rule
+        // may claim "blocked" or "stranded" without these. Config says what SHOULD
+        // happen; only these say what DID.
+        try {
+          const sentHex = await rawCall(
+            srcClient, ENDPOINT,
+            encodeFunctionData({ abi: NONCE_ABI, functionName: "outboundNonce", args: [oftAddr, eid, pad(peerAddrChecked, { size: 32 })] }),
+          );
+          if (sentHex && sentHex !== "0x") {
+            const sent = Number(BigInt(sentHex));
+            let delivered: number | null = null;
+            try {
+              const dHex = await rawCall(
+                dstClient, dstEndpoint,
+                encodeFunctionData({ abi: NONCE_ABI, functionName: "inboundNonce", args: [peerAddrChecked, chain.eid, pad(oftAddr, { size: 32 })] }),
+              );
+              // A failed destination read must stay null. Coercing it to 0 would invent
+              // `sent` stranded messages out of an RPC hiccup — a false HIGH on every
+              // corridor whose destination is briefly unreachable.
+              if (dHex && dHex !== "0x") delivered = Number(BigInt(dHex));
+            } catch { /* delivered stays null */ }
+            route.delivery = { sent, delivered };
+            // UNTESTED discriminator: stamp whether the delivery history crossed under
+            // the CURRENT config, when (and only when) an archival verification exists
+            // and is still valid — see block-claim-verifications.ts for the validity rule.
+            stampDelivery(route.delivery, route.uln, getBlockClaimVerification(chain.chainId, oftAddr, eid));
+          }
+        } catch { /* delivery stays undefined */ }
       }
 
-      // ── Step 3b: liveness ────────────────────────────────────────────────
-      // Can value actually move through this corridor? Teams pre-wire chains long
-      // before they open them, and a config on a corridor nothing can traverse is not
-      // a security posture anyone chose. Bounds what the rules may assert downstream.
-      route.liveness = await probeLiveness(liveClients, oftAddr, eid, peerAddr ?? null, probeAmount, chain.chainId);
+      // ── Step 3b: sendability ─────────────────────────────────────────────
+      // Will this corridor accept a send? Teams pre-wire chains long before opening
+      // them, and a config on a corridor nothing can even enter is not a security
+      // posture anyone chose. It also separates a harmless dormant misconfiguration
+      // from a live funds trap (see the receive-side rules in drift.ts).
+      route.sendability = await probeSendability(liveClients, oftAddr, eid, peerAddr ?? null, probeAmount, chain.chainId);
 
       routes.push(route);
     })
