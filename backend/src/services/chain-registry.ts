@@ -111,3 +111,28 @@ export function getChainRefByKey(chainKey: string): ChainRef | null {
 export function listEligibleChains(): ChainRef[] {
   return [...load().byKey.values()].filter((c) => c.eligible);
 }
+
+// Display names live next to the registry so that adding a chain names it
+// everywhere at once — the frontend renders /status `chains` verbatim and has
+// no chain-name table of its own. Override only where capitalizing the
+// chainKey isn't the accepted spelling.
+const DISPLAY_NAME_OVERRIDES: Record<string, string> = {
+  bsc: "BNB Chain",
+  opbnb: "opBNB",
+  okx: "OKX",
+  xdc: "XDC",
+  xlayer: "X Layer",
+  zksync: "zkSync",
+  zkevm: "Polygon zkEVM",
+  coredao: "Core DAO",
+  dfk: "DFK Chain",
+  megaeth: "MegaETH",
+  injectiveevm: "Injective EVM",
+  cronosevm: "Cronos",
+  cronoszkevm: "Cronos zkEVM",
+};
+
+export function chainDisplayName(chainKey: string | null | undefined): string {
+  if (!chainKey) return "Unknown";
+  return DISPLAY_NAME_OVERRIDES[chainKey] ?? chainKey.charAt(0).toUpperCase() + chainKey.slice(1);
+}

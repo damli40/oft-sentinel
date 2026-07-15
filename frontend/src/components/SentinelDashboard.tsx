@@ -281,7 +281,7 @@ interface CopilotProps {
 
 function SecurityCopilot({ onClose }: CopilotProps) {
   const [messages, setMessages] = useState<CopilotMsg[]>([
-    { role: "assistant", text: "I'm OFT Sentinel's security AI. Ask me anything about bridge security, DVN configurations, or the OFTs we watch across Ethereum, Base, and Mantle." },
+    { role: "assistant", text: "I'm OFT Sentinel's security AI. Ask me anything about bridge security, DVN configurations, or the OFTs we watch across every monitored chain." },
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);

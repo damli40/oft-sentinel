@@ -1,17 +1,5 @@
 import { useState } from "react";
-import type { MantleOft, WatchedStatus } from "../api.ts";
-
-const CHAIN_NAMES: Record<number, string> = {
-  1: "Ethereum",
-  8453: "Base",
-  5000: "Mantle",
-  56: "BNB Chain",
-  42161: "Arbitrum",
-};
-
-function chainName(id: number): string {
-  return CHAIN_NAMES[id] ?? `Chain ${id}`;
-}
+import type { MantleOft, WatchedChain, WatchedStatus } from "../api.ts";
 
 function formatUsd(n: number): string {
   if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
@@ -44,20 +32,27 @@ const RISK_RANK: Record<string, number> = { CRITICAL: 0, AT_RISK: 1, PASS: 2 };
 
 interface Props {
   status: WatchedStatus[] | undefined;
+  /** Chain names/order from /status — the backend registry is the only namer. */
+  chains: WatchedChain[] | undefined;
   /** Dune volume data — Mantle only; used to add a volume column on that tab. */
   ofts: MantleOft[] | null;
 }
 
-export function FleetBoard({ status, ofts }: Props) {
+export function FleetBoard({ status, chains: served, ofts }: Props) {
   const watched = status ?? [];
 
-  // chains present in the live fleet, biggest first
-  const counts = new Map<number, number>();
-  watched.forEach(w => counts.set(w.chainId, (counts.get(w.chainId) ?? 0) + 1));
-  const chains = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  // Chains as served by the backend; fall back to deriving them from the fleet
+  // (id-only names) so the board still works against an older backend.
+  const chains: WatchedChain[] = served ?? (() => {
+    const counts = new Map<number, number>();
+    watched.forEach(w => counts.set(w.chainId, (counts.get(w.chainId) ?? 0) + 1));
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([chainId, count]) => ({ chainId, chainKey: null, name: `Chain ${chainId}`, count }));
+  })();
 
   const [selected, setSelected] = useState<number | null>(null);
-  const activeChain = selected ?? chains[0]?.[0] ?? null;
+  const activeChain = selected ?? chains[0]?.chainId ?? null;
 
   // Mantle volume lookup (by address, ticker as fallback)
   const volByAddr = new Map<string, number>();
@@ -85,13 +80,13 @@ export function FleetBoard({ status, ofts }: Props) {
     <div>
       {chains.length > 0 && (
         <div className="fleet-tabs">
-          {chains.map(([id, n]) => (
+          {chains.map(c => (
             <button
-              key={id}
-              className={`fleet-tab${id === activeChain ? " on" : ""}`}
-              onClick={() => setSelected(id)}
+              key={c.chainId}
+              className={`fleet-tab${c.chainId === activeChain ? " on" : ""}`}
+              onClick={() => setSelected(c.chainId)}
             >
-              {chainName(id)} <span className="n">{n}</span>
+              {c.name} <span className="n">{c.count}</span>
             </button>
           ))}
         </div>

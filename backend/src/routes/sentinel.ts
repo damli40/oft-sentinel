@@ -6,7 +6,7 @@ import { assessSnapshot, RULES_VERSION } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
 import { askCopilot } from "../services/ask.js";
 import { loadDvnMeta, resolveDvn, dvnMetaHash, MetadataUnavailableError, type DvnMeta } from "../services/lz-config.js";
-import { getChainRef } from "../services/chain-registry.js";
+import { getChainRef, chainDisplayName } from "../services/chain-registry.js";
 
 export const router = Router();
 
@@ -69,7 +69,7 @@ router.get("/status", async (_req: Request, res: Response) => {
   } catch (e) {
     if (e instanceof MetadataUnavailableError) {
       return res.status(200).json({
-        watched: [], msi: null,
+        watched: [], chains: [], msi: null,
         msiBreakdown: { critical: 0, atRisk: 0, safe: 0, unassessed: 0 },
         registry: process.env.AUDIT_REGISTRY_ADDRESS,
         alertBus: process.env.ALERT_BUS_ADDRESS,
@@ -139,6 +139,18 @@ router.get("/status", async (_req: Request, res: Response) => {
     };
   }));
 
+  // Distinct chains actually watched, biggest fleet first. This is THE source the
+  // frontend renders chain names, fleet tabs, and hero/footer copy from — adding a
+  // chain to the registry + watchlist updates the whole UI with zero frontend edits.
+  const chainCounts = new Map<number, number>();
+  for (const w of watched) chainCounts.set(w.chainId, (chainCounts.get(w.chainId) ?? 0) + 1);
+  const chains = [...chainCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([chainId, count]) => {
+      const key = getChainRef(chainId)?.chainKey ?? null;
+      return { chainId, chainKey: key, name: key ? chainDisplayName(key) : `Chain ${chainId}`, count };
+    });
+
   // Mantle Security Index: unweighted average of all assessed scores (0–100).
   // DEMO is synthetic (replay-only) — it must never move the fleet index.
   const real = watched.filter((w) => w.ticker !== "DEMO");
@@ -159,6 +171,7 @@ router.get("/status", async (_req: Request, res: Response) => {
   const metaAgeMs = Date.now() - dvnMeta.fetchedAt;
   res.json({
     watched,
+    chains,
     msi,
     msiBreakdown,
     registry: process.env.AUDIT_REGISTRY_ADDRESS,

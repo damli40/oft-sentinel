@@ -92,8 +92,20 @@ export interface WatchedStatus {
   dvnNames: Record<string, string> | null;
 }
 
+/** A chain the Sentinel currently watches — served by /status, derived from the
+ *  backend chain registry. The ONLY source of chain names in the UI: never
+ *  hardcode chain names in frontend copy, so adding a chain on the backend
+ *  updates the whole frontend automatically. */
+export interface WatchedChain {
+  chainId: number;
+  chainKey: string | null;
+  name: string;
+  count: number;
+}
+
 export interface SentinelStatus {
   watched: WatchedStatus[];
+  chains?: WatchedChain[];
   msi: number | null;
   msiBreakdown: { critical: number; atRisk: number; safe: number; unassessed: number } | null;
   registry?: string;

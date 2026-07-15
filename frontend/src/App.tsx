@@ -6,13 +6,35 @@ import { SentinelDashboard } from "./components/SentinelDashboard.tsx";
 import { FlowAnimation } from "./components/FlowAnimation.tsx";
 import { OftArchitecture } from "./components/OftArchitecture.tsx";
 import { getMantleOfts, getSentinelStatus } from "./api.ts";
-import type { MantleOft, SentinelStatus } from "./api.ts";
+import type { MantleOft, SentinelStatus, WatchedChain } from "./api.ts";
 import "./landing.css";
 import "./architecture.css";
 
 type View = "app" | "story" | "sentinel";
 
 function pad(n: number) { return String(Math.round(n)).padStart(2, "0"); }
+
+// Chain names come ONLY from /status `chains` (the backend chain registry).
+// Never hardcode a chain name in frontend copy — adding a chain on the backend
+// must update every mention here automatically.
+function watchedChains(status: SentinelStatus | null): WatchedChain[] {
+  if (!status) return [];
+  if (status.chains?.length) return status.chains;
+  // older backend: derive from the fleet, id-only names
+  const counts = new Map<number, number>();
+  status.watched.forEach(w => counts.set(w.chainId, (counts.get(w.chainId) ?? 0) + 1));
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([chainId, count]) => ({ chainId, chainKey: null, name: `Chain ${chainId}`, count }));
+}
+
+/** "Ethereum, Base, and Mantle" — for prose; null until status loads. */
+function chainProse(chains: WatchedChain[]): string | null {
+  if (chains.length === 0) return null;
+  const names = chains.map(c => c.name);
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
 
 function ago(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -78,7 +100,8 @@ interface HeroProps {
 }
 
 function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
-  const chains = status ? new Set(status.watched.map(w => w.chainId)).size : 0;
+  const chains = watchedChains(status);
+  const prose = chainProse(chains);
   const oftsWatched = status?.watched.length ?? ofts?.length ?? 0;
   const criticals = status?.watched.filter(w => w.assessment?.riskLevel === "CRITICAL").length ?? 0;
   const lastPollMs = status?.watched.reduce((m, w) => Math.max(m, w.lastSnapshotAt ?? 0), 0) ?? 0;
@@ -99,7 +122,7 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
       <div className="hero-copy">
         <span className="kicker">
           <span className="live-dot" style={{ background: "var(--scan)", boxShadow: "0 0 8px var(--scan)" }} />
-          AUTONOMOUS OFT SECURITY · ETHEREUM · BASE · MANTLE
+          AUTONOMOUS OFT SECURITY · {chains.length ? chains.map(c => c.name).join(" · ").toUpperCase() : "MULTI-CHAIN"}
         </span>
         <h1>
           Configurable trust,<br />
@@ -108,7 +131,7 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
         <p className="lede">
           LayerZero lets every token pick its own verifiers, thresholds, and libraries,
           <b> the most flexible security model in crypto</b>. <b>OFT Sentinel</b> reads that config
-          live across Ethereum, Base, and Mantle every hour and writes on-chain proof it stays safe.
+          live across {prose ?? "every chain it watches"} every hour and writes on-chain proof it stays safe.
         </p>
         <div className="cta-row">
           <button className="btn btn-primary" onClick={onSentinel}>
@@ -131,7 +154,7 @@ function HeroSection({ ofts, status, onSentinel, onFleet }: HeroProps) {
         </a>
         <div className="live-strip">
           <div className="stat">
-            <div className="v tnum" id="s-chains">{chains || "-"}</div>
+            <div className="v tnum" id="s-chains">{chains.length || "-"}</div>
             <div className="l">CHAINS</div>
           </div>
           <div className="stat">
@@ -186,6 +209,9 @@ export default function App() {
     if (el) window.scrollTo({ top: el.offsetTop - 70, behavior: "smooth" });
   }
 
+  const chains = watchedChains(status);
+  const prose = chainProse(chains);
+
   if (view === "story") return <Storyboard onClose={() => setView("app")} />;
 
   if (view === "sentinel") {
@@ -220,10 +246,10 @@ export default function App() {
                   OFT
                   <span className="tipbox"><b>OFT</b>: a token that can move across multiple blockchains via LayerZero.</span>
                 </span>
-                {" "}on Ethereum, Base, and Mantle, re-checked every hour. The agent reads each bridge's live on-chain config and looks for dangerous drift.
+                {" "}on {prose ?? "every watched chain"}, re-checked every hour. The agent reads each bridge's live on-chain config and looks for dangerous drift.
               </p>
               <div className="metric">
-                {status ? `${status.watched.length} OFTs` : "175 OFTs"} · 3 chains · hourly
+                {status ? `${status.watched.length} OFTs · ${chains.length} chains · hourly` : "watching the fleet · hourly"}
               </div>
             </div>
             <div className="prop">
@@ -263,7 +289,7 @@ export default function App() {
             <div className="meta">LIVE SENTINEL STATUS · BY CHAIN</div>
           </div>
 
-          <FleetBoard status={status?.watched} ofts={ofts} />
+          <FleetBoard status={status?.watched} chains={status?.chains} ofts={ofts} />
 
           <div className="cta-band">
             <div>
@@ -309,7 +335,7 @@ export default function App() {
           </div>
 
           <footer className="foot">
-            <div>OFT Sentinel · Autonomous security for LayerZero OFTs · Ethereum · Base · Mantle</div>
+            <div>OFT Sentinel · Autonomous security for LayerZero OFTs{chains.length ? ` · ${chains.map(c => c.name).join(" · ")}` : ""}</div>
             <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
               <button
                 onClick={() => setView("story")}

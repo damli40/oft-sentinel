@@ -10,6 +10,7 @@ import {
   distinctProviderCount,
   normalizeProvider,
   _resetChainRegistryCache,
+  chainDisplayName,
 } from "../services/chain-registry.js";
 
 // Isolated registry fixtures via CHAIN_REGISTRY_PATH; cache reset between tests.
@@ -140,5 +141,24 @@ describe("missing / malformed file", () => {
     process.env.CHAIN_REGISTRY_PATH = file;
     _resetChainRegistryCache();
     expect(() => getChainRef(5000)).toThrow(/malformed/);
+  });
+});
+
+describe("chainDisplayName", () => {
+  it("capitalizes a plain chainKey", () => {
+    expect(chainDisplayName("ethereum")).toBe("Ethereum");
+    expect(chainDisplayName("base")).toBe("Base");
+    expect(chainDisplayName("mantle")).toBe("Mantle");
+  });
+
+  it("uses the accepted spelling where capitalization is wrong", () => {
+    expect(chainDisplayName("bsc")).toBe("BNB Chain");
+    expect(chainDisplayName("zksync")).toBe("zkSync");
+    expect(chainDisplayName("opbnb")).toBe("opBNB");
+  });
+
+  it("never throws on missing input", () => {
+    expect(chainDisplayName(null)).toBe("Unknown");
+    expect(chainDisplayName(undefined)).toBe("Unknown");
   });
 });
