@@ -7,6 +7,10 @@
     "dev": "tsx watch src/index.ts",
     "build": "echo 'no build step'",
     "audit": "tsx src/services/audit-engine.ts",
+    "disclosure:scan": "SCAN_OUT=/tmp/scan.ndjson tsx src/scripts/scan-readonly.ts",
+    "disclosure:check": "tsx src/scripts/disclosure-digest.ts check --scan /tmp/scan.ndjson",
+    "disclosure:mark": "tsx src/scripts/disclosure-digest.ts mark --scan /tmp/scan.ndjson",
+    "disclosure:list": "tsx src/scripts/disclosure-digest.ts list",
     "test": "vitest run",
     "test:watch": "vitest"
   },
