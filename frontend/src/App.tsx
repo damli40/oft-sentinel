@@ -251,10 +251,10 @@ export default function App() {
                   OFT
                   <span className="tipbox"><b>OFT</b>: a token that can move across multiple blockchains via LayerZero.</span>
                 </span>
-                {" "}on Mantle, re-checked every 5 minutes. The agent reads each bridge's live on-chain config and looks for dangerous drift.
+                {" "}on Mantle, re-checked every hour. The agent reads each bridge's live on-chain config and looks for dangerous drift.
               </p>
               <div className="metric">
-                {status ? `${status.watched.length} OFTs` : "28 OFTs"} · every 5 min
+                {status ? `${status.watched.length} OFTs` : "28 OFTs"} · hourly
               </div>
             </div>
             <div className="prop">

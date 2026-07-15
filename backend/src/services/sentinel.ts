@@ -246,7 +246,12 @@ export function resetDemo(): void {
   hideVerdictsBefore(KELP_DEMO_OFT.address, KELP_DEMO_OFT.chainId);
 }
 
-export function startSentinel(intervalMs = 5 * 60_000): void {
+// Hourly by default: a full fleet sweep is ~20 min of continuous RPC reads and config
+// changes are rare — the 5-min timer mostly skipped into the still-running previous
+// sweep anyway. POLL_INTERVAL_MS overrides (event-driven detection is the real fix).
+const DEFAULT_POLL_INTERVAL_MS = 60 * 60_000;
+
+export function startSentinel(intervalMs = Number(process.env.POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS): void {
   console.log(`[sentinel] starting fleet poll on Mantle (${MANTLE_CHAIN_ID}), every ${intervalMs / 1000}s`);
   // DEMO shows its healthy baseline from boot — but never clobber a replayed
   // state on restart; the dashboard's "Reset demo" button does that explicitly.

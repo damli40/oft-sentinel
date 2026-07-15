@@ -41,7 +41,7 @@ const STOPS: Stop[] = [
   { id: "dvn", n: 4, label: "DVN Security Stack", layer: "Workers", glyph: "◈", watched: true, ctl: "dvn",
     plain: "The verifiers. At 1-of-1, one compromised verifier can forge any transfer.",
     detail: "<b>Decentralized Verifier Networks</b> each confirm the message’s payloadHash is genuine, configured as <b>X-of-Y-of-N</b>. This is where cross-chain security lives. In April 2026 the <b>Kelp / rsETH</b> bridge ran a <b>1-of-1</b> config: one verifier, no backup. An attacker forged a message and drained <b>$292M</b>.<br><br><b>Block confirmations</b> live here too: DVNs wait for the source chain to finalize before attesting. Fewer confirmations means weaker finality.",
-    sev: "crit", watch: "Sentinel’s first check. It reads the <b>required-DVN count</b> and threshold every 5 minutes. A count falling toward 1 rates <b>CRITICAL</b>, the Kelp pattern. It also flags a drop in block confirmations." },
+    sev: "crit", watch: "Sentinel’s first check. It reads the <b>required-DVN count</b> and threshold on every sweep. A count falling toward 1 rates <b>CRITICAL</b>, the Kelp pattern. It also flags a drop in block confirmations." },
 
   { id: "exec", n: 5, label: "Executor", layer: "Workers", glyph: "▸", watched: false,
     plain: "Delivers the verified message and pays the gas for you. You don’t have to trust it.",
@@ -269,7 +269,7 @@ export function OftArchitecture() {
       vsubEl.textContent = r.lvl === "crit"
         ? "This config is exploitable. Sentinel would attest CRITICAL and fire an on-chain alert."
         : r.lvl === "warn"
-        ? "Functional, but drifting from the 2-of-2 baseline. Sentinel rechecks it every 5 minutes."
+        ? "Functional, but drifting from the 2-of-2 baseline. Sentinel rechecks it on every sweep."
         : "Meets the security baseline. No findings on the monitored config.";
 
       if (r.findings.length === 0) {
