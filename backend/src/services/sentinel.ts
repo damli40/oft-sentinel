@@ -28,6 +28,42 @@ let watchedCache: { at: number; list: WatchedOft[] } | null = null;
 const WATCHED_TTL = 10 * 60_000;
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
+// A watchlist source failing must surface as an incident, never as a silently
+// smaller fleet: a Dune outage on a cold cache used to mean "poll nothing" with
+// the dashboard still showing yesterday's tiles — a monitoring blackout displayed
+// as safety, the same bug class the DVN-metadata preflight exists to kill.
+export interface WatchlistHealth {
+  degraded: boolean;
+  reasons: string[]; // one per failed source, e.g. "ethereum watchlist fetch failed: dune 500"
+  lastRefreshAt: number | null; // last time every source resolved
+  servedStaleAt: number | null; // set when the last good list is served past a failed refresh
+}
+
+let watchlistHealth: WatchlistHealth = {
+  degraded: false,
+  reasons: [],
+  lastRefreshAt: null,
+  servedStaleAt: null,
+};
+
+export function getWatchlistHealth(): WatchlistHealth {
+  return { ...watchlistHealth };
+}
+
+// One-shot latch, same shape as metadataBlackoutAlerted: alert on the transition
+// into a degraded watchlist, re-arm on the first clean refresh.
+let watchlistDegradedAlerted = false;
+
+async function alertWatchlistDegraded(reasons: string[]): Promise<void> {
+  if (watchlistDegradedAlerted) return;
+  watchlistDegradedAlerted = true;
+  await sendTelegram(
+    process.env.TELEGRAM_CHAT_ID ?? null,
+    `🚨 <b>Sentinel watchlist DEGRADED</b>\n${reasons.join("\n")}\nAffected chains are not being refreshed; serving the last good list where one exists. Monitoring coverage is reduced until this clears.`,
+    "watchlist-degraded",
+  ).catch((err) => console.error("[sentinel] watchlist-degraded alert failed:", err?.message));
+}
+
 export async function getWatched(force = false): Promise<WatchedOft[]> {
   if (!force && watchedCache && Date.now() - watchedCache.at < WATCHED_TTL)
     return [...watchedCache.list, KELP_DEMO_OFT];
@@ -42,13 +78,18 @@ export async function getWatched(force = false): Promise<WatchedOft[]> {
     seen.add(key);
     list.push({ ticker, address, chainId });
   };
+  const failures: string[] = [];
 
   // Mantle: all-time leaderboard, ≥$1M volume (behavior unchanged).
-  const mantleOfts = await getMantleOfts(force).catch(() => []);
-  for (const o of mantleOfts) {
-    if (!o.address || !ADDR_RE.test(o.address)) continue;
-    if (o.usdVolume < WATCHLIST_MIN_VOLUME) continue;
-    add(o.ticker, o.address, MANTLE_CHAIN_ID);
+  try {
+    const mantleOfts = await getMantleOfts(force);
+    for (const o of mantleOfts) {
+      if (!o.address || !ADDR_RE.test(o.address)) continue;
+      if (o.usdVolume < WATCHLIST_MIN_VOLUME) continue;
+      add(o.ticker, o.address, MANTLE_CHAIN_ID);
+    }
+  } catch (e: any) {
+    failures.push(`mantle watchlist fetch failed: ${e?.message ?? e}`);
   }
 
   // Additional EVM chains: active-OFT rule (10+ msgs / 7-day), no volume floor.
@@ -56,15 +97,39 @@ export async function getWatched(force = false): Promise<WatchedOft[]> {
   for (const chainKey of activeWatchlistChainKeys()) {
     const ref = getChainRefByKey(chainKey);
     if (!ref || !ref.eligible) continue;
-    const ofts = await getActiveOftsForChain(chainKey, force).catch(() => []);
-    for (const o of ofts) {
-      if (!o.address || !ADDR_RE.test(o.address)) continue;
-      add(o.ticker, o.address, ref.chainId);
+    try {
+      const ofts = await getActiveOftsForChain(chainKey, force);
+      for (const o of ofts) {
+        if (!o.address || !ADDR_RE.test(o.address)) continue;
+        add(o.ticker, o.address, ref.chainId);
+      }
+    } catch (e: any) {
+      failures.push(`${chainKey} watchlist fetch failed: ${e?.message ?? e}`);
     }
   }
 
-  if (list.length) watchedCache = { at: Date.now(), list };
-  // DEMO is always appended — not in Dune, not polled, used only for replay.
+  if (failures.length === 0) {
+    // Clean refresh: cache it, clear degradation, re-arm the blackout latch.
+    if (list.length) watchedCache = { at: Date.now(), list };
+    watchlistHealth = { degraded: false, reasons: [], lastRefreshAt: Date.now(), servedStaleAt: null };
+    watchlistDegradedAlerted = false;
+    return [...list, KELP_DEMO_OFT];
+  }
+
+  // Degraded refresh. If everything failed, the last good list beats an empty fleet:
+  // stale coverage keeps monitoring alive while the status flag says exactly how stale.
+  const serveStale = list.length === 0 && watchedCache !== null;
+  watchlistHealth = {
+    degraded: true,
+    reasons: failures,
+    lastRefreshAt: watchlistHealth.lastRefreshAt,
+    servedStaleAt: serveStale ? watchedCache!.at : null,
+  };
+  for (const f of failures) console.error(`[sentinel] ${f}`);
+  await alertWatchlistDegraded(failures);
+  if (serveStale) return [...watchedCache!.list, KELP_DEMO_OFT];
+  // Partial coverage: serve what resolved this cycle without overwriting the
+  // (possibly fuller) cached list — the failed chains recover from cache next refresh.
   return [...list, KELP_DEMO_OFT];
 }
 

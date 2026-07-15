@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { getWatched, pollOnce, runKelpReplay, runLibraryRevertReplay, runRpcConflictReplay, resetDemo } from "../services/sentinel.js";
+import { getWatched, getWatchlistHealth, pollOnce, runKelpReplay, runLibraryRevertReplay, runRpcConflictReplay, resetDemo } from "../services/sentinel.js";
 import { getVerdicts, getSnapshot, latestVerdict, getScoreHistory, getFeedEvents } from "../services/snapshot-store.js";
 import { assessSnapshot, RULES_VERSION } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
@@ -169,6 +169,10 @@ router.get("/status", async (_req: Request, res: Response) => {
       fetchedAt: dvnMeta.fetchedAt,
       stale: metaAgeMs > 24 * 3600_000,
     },
+    // Watchlist provenance, same contract as dvnMeta: tiles keep rendering during a
+    // Dune outage, but the response says the fleet list is degraded/stale so the UI
+    // can mark reduced coverage instead of displaying absence as safety.
+    watchlist: getWatchlistHealth(),
   });
 });
 
