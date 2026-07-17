@@ -36,6 +36,13 @@ export interface WatchedEntry {
     tis: Array<{ action: string; severity?: string; corridors?: string[] }>;
   } | null;
   dvnCorridors?: DvnCorridor[];
+  latestVerdict?: {
+    verdict: string;
+    verdictHash: string;
+    capturedAt: number;
+    attestTxHash?: string | null;
+    attestationId?: string | null;
+  } | null;
 }
 
 export interface FleetRow {
