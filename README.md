@@ -6,7 +6,8 @@
 <!-- Detects security-relevant configuration drift the moment it happens and alerts teams. -->
 <!-- Writes immutable on-chain attestations; every verdict is reproducible (keccak256(pdr) == verdictHash). -->
 <!-- Stack: TypeScript + Node/Express backend, React/Vite frontend, viem RPC reads, Hardhat contracts on Mantle. -->
-<!-- Freshness: 2026-07-13. -->
+<!-- MCP server in mcp/: six read+validate tools so agents can pre-flight OFT configs and verify attestations. -->
+<!-- Freshness: 2026-07-17. -->
 
 **Continuous trust-intelligence for omnichain assets on Mantle.**
 
@@ -62,6 +63,54 @@ OFT Sentinel answers the question that audits cannot: **did this protocol's secu
 6. Click any OFT tile → per-corridor DVN configuration (USDT0 alone spans 20 corridors) + remediation steps with pre-flight scores
 7. Open **Security Copilot** → ask "Which OFT would you attack first?" → DeepSeek answers from live fleet context
 8. Click **↓** on any tile → download a full AI-written audit report
+
+---
+
+## Agent Access — the MCP Server (`mcp/`)
+
+**The MCP that won't let an agent ship a Kelp.** Any MCP-capable agent (Claude Code, Claude Desktop, Cursor, …) can talk to Sentinel directly: read the watched fleet, pull a corridor's DVN config, **validate a proposed config against the same deterministic rule engine that produces the on-chain attestations — before deploying it** — and independently verify any attestation against the chain. There are **no write tools by design**: the server cannot deploy, sign, or bridge, and it never touches a private key.
+
+### What it does — six read+validate tools
+
+| Tool | What an agent gets |
+|---|---|
+| `list_fleet` | Every watched OFT with risk band + score; filter by chain or risk |
+| `get_oft_config` | Per-corridor required/optional DVN sets with resolved operator names, thresholds, effective counts |
+| `get_verdict` | Live score/risk/reasons/remediation + the last on-chain attested verdict |
+| `get_drift_history` | When the config drifted and what was attested about it |
+| `verify_attestation` | Recomputes `keccak256(PDR)` locally and compares it to the backend AND the on-chain AuditRegistry — trustless, does not assume the backend is honest |
+| `validate_config` | Pre-flight a config against the rule engine; answers with findings worst-first and an explicit **DO NOT SHIP** on CRITICAL (a 1-of-1 DVN route is how Kelp rsETH lost $292M) |
+
+### Install
+
+```bash
+git clone https://github.com/damli40/oft-sentinel.git
+cd oft-sentinel/mcp
+npm ci && npm run build        # → dist/index.js (stdio server)
+```
+
+**Claude Code:**
+
+```bash
+claude mcp add oft-sentinel -- node /abs/path/to/oft-sentinel/mcp/dist/index.js
+```
+
+**Claude Desktop** — add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "oft-sentinel": {
+      "command": "node",
+      "args": ["/abs/path/to/oft-sentinel/mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+No API key needed — the server reads the public Sentinel API. Optional env: `SENTINEL_API_URL` (backend override), `SENTINEL_SEPOLIA_RPC` (RPC for the trustless attestation read; env-only on purpose so no agent can redirect it). Full details in [`mcp/README.md`](mcp/README.md).
+
+Measured against live prod: `validate_config` answers in well under a second; `verify_attestation` takes ~3–4s because it genuinely round-trips Mantle Sepolia — that latency *is* the trustlessness.
 
 ---
 
@@ -248,6 +297,7 @@ All endpoints are on the backend (default port 3001).
 |---|---|---|
 | GET | `/status` | Fleet status: all watched OFTs with `assessment` (score, riskLevel, reasons, tis with preflight), `latestVerdict` (includes pdr + tis), `msi`, `msiBreakdown`, `dvnSummary`, `dvnNames` |
 | GET | `/verdicts` | Full attestation history; each verdict includes `pdr` and `tis` |
+| POST | `/validate` | Rule engine as a pure function: `{snapshot, ticker?, custodyDeclaration?}` → `{score, riskLevel, findings, tis, rulesVersion}` — no attestation, no alerts, no state (powers the MCP `validate_config` tool) |
 | POST | `/poll` | Run one fleet poll across all watched OFTs immediately |
 | POST | `/replay-kelp` | Kelp demo: 1-of-1 DVN drift → real attest + alert tx on DEMO |
 | POST | `/replay-library-revert` | Receive library reverted to default → CRITICAL on DEMO |
