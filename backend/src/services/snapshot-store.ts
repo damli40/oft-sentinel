@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
-import type { OftSnapshot, SentinelVerdict } from "../types.js";
+import type { Finding, OftSnapshot, SentinelVerdict } from "../types.js";
 
 // DATA_DIR can be overridden via env var — set to /data on Railway (persistent volume).
 const DATA_DIR = process.env.DATA_DIR
@@ -20,7 +20,9 @@ interface State {
   // key → fingerprint of the last weak-config (persistent CRITICAL, no drift)
   // attestation fired. Persisted so a backend restart cannot re-attest and
   // re-alert the whole CRITICAL band; a changed fingerprint re-fires.
-  weakAlerts?: Record<string, { fingerprint: string; firedAt: number }>;
+  // corridors = the per-corridor finding sets behind that fingerprint, so a
+  // corridor whose reads flake next cycle carries forward instead of re-firing.
+  weakAlerts?: Record<string, { fingerprint: string; firedAt: number; corridors?: Record<string, Finding[]> }>;
 }
 
 let memState: State | null = null;
@@ -91,9 +93,20 @@ export function getWeakAlertFingerprint(oft: string, chainId: number): string | 
   return load().weakAlerts?.[key(oft, chainId)]?.fingerprint ?? null;
 }
 
-export function putWeakAlertFingerprint(oft: string, chainId: number, fingerprint: string): void {
+/** Per-corridor findings behind the last-fired fingerprint. null for records written
+ *  before the corridor-merge dedup existed — those re-fire once, then store corridors. */
+export function getWeakAlertCorridors(oft: string, chainId: number): Record<string, Finding[]> | null {
+  return load().weakAlerts?.[key(oft, chainId)]?.corridors ?? null;
+}
+
+export function putWeakAlertFingerprint(
+  oft: string,
+  chainId: number,
+  fingerprint: string,
+  corridors?: Record<string, Finding[]>,
+): void {
   const state = load();
-  state.weakAlerts = { ...state.weakAlerts, [key(oft, chainId)]: { fingerprint, firedAt: Date.now() } };
+  state.weakAlerts = { ...state.weakAlerts, [key(oft, chainId)]: { fingerprint, firedAt: Date.now(), corridors } };
   save(state);
 }
 
