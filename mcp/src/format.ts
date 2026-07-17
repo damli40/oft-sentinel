@@ -10,6 +10,19 @@ export interface StatusPayload {
   watched: WatchedEntry[];
 }
 
+export interface DvnCorridor {
+  corridor: string;
+  eid: number;
+  uln: {
+    requiredCount: number;
+    optionalThreshold: number;
+    effectiveCount: number;
+    requiredDVNs: string[];
+    optionalDVNs: string[];
+    names?: Record<string, string>;
+  } | null;
+}
+
 export interface WatchedEntry {
   ticker: string;
   address: string;
@@ -22,6 +35,7 @@ export interface WatchedEntry {
     reasons: string[];
     tis: Array<{ action: string; severity?: string; corridors?: string[] }>;
   } | null;
+  dvnCorridors?: DvnCorridor[];
 }
 
 export interface FleetRow {
@@ -47,6 +61,77 @@ export function fleetRows(status: StatusPayload): FleetRow[] {
     corridors: w.corridors ?? [],
     lastSnapshotAt: w.lastSnapshotAt ?? null,
   }));
+}
+
+export interface DvnRef { address: string; name: string | null }
+
+export interface CorridorConfig {
+  corridor: string;
+  eid: number;
+  requiredCount: number;
+  optionalThreshold: number;
+  effectiveCount: number;
+  unreadable: boolean;
+  requiredDVNs: DvnRef[];
+  optionalDVNs: DvnRef[];
+}
+
+/** Per-corridor DVN config rows. A null uln means the corridor could not be
+ *  read this cycle — surface that honestly rather than dropping the row. */
+export function corridorSummary(entry: WatchedEntry): CorridorConfig[] {
+  return (entry.dvnCorridors ?? []).map((c) => {
+    if (!c.uln) {
+      return {
+        corridor: c.corridor, eid: c.eid,
+        requiredCount: 0, optionalThreshold: 0, effectiveCount: 0,
+        unreadable: true, requiredDVNs: [], optionalDVNs: [],
+      };
+    }
+    const named = (addr: string): DvnRef => ({ address: addr, name: c.uln?.names?.[addr] ?? null });
+    return {
+      corridor: c.corridor,
+      eid: c.eid,
+      requiredCount: c.uln.requiredCount,
+      optionalThreshold: c.uln.optionalThreshold,
+      effectiveCount: c.uln.effectiveCount,
+      unreadable: false,
+      requiredDVNs: c.uln.requiredDVNs.map(named),
+      optionalDVNs: c.uln.optionalDVNs.map(named),
+    };
+  });
+}
+
+export type ResolveResult = { ok: true; entry: WatchedEntry } | { ok: false; error: string };
+
+/** Resolve address(+chain) against the watched fleet. The same OFT address is
+ *  routinely deployed on multiple chains (USDe is on all three), so an
+ *  ambiguous address is an error that lists the candidates — never a guess. */
+export function resolveAsset(status: StatusPayload, address: string, chain?: string | number): ResolveResult {
+  const chainName = new Map(status.chains.map((c) => [c.chainId, c.name]));
+  const nameOf = (id: number) => chainName.get(id) ?? String(id);
+  const needle = address.toLowerCase();
+  const matches = status.watched.filter((w) => w.address.toLowerCase() === needle);
+  if (matches.length === 0) {
+    return { ok: false, error: `${address} is not watched — call list_fleet to see the fleet.` };
+  }
+  if (chain !== undefined) {
+    const key = String(chain).toLowerCase();
+    const onChain = matches.filter((w) => nameOf(w.chainId).toLowerCase() === key || String(w.chainId) === key);
+    if (onChain.length === 0) {
+      return {
+        ok: false,
+        error: `${address} is not watched on chain "${chain}" — it is watched on: ${matches.map((w) => nameOf(w.chainId)).join(", ")}.`,
+      };
+    }
+    return { ok: true, entry: onChain[0] };
+  }
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error: `${address} is deployed on multiple chains: ${matches.map((w) => `${nameOf(w.chainId)} (${w.chainId})`).join(", ")}. Pass the chain parameter to pick one.`,
+    };
+  }
+  return { ok: true, entry: matches[0] };
 }
 
 /** One-line fleet posture, e.g. "175 OFTs watched across 3 chains — 22 CRITICAL / 75 AT_RISK / 64 PASS / 13 UNASSESSED (rules 4.1.0)". */
