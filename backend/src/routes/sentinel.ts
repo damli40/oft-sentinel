@@ -7,6 +7,7 @@ import { generateReport } from "../services/report.js";
 import { askCopilot } from "../services/ask.js";
 import { loadDvnMeta, resolveDvn, dvnMetaHash, MetadataUnavailableError, type DvnMeta } from "../services/lz-config.js";
 import { getChainRef, chainDisplayName } from "../services/chain-registry.js";
+import type { CustodyDeclaration, OftSnapshot } from "../types.js";
 
 export const router = Router();
 
@@ -192,6 +193,96 @@ router.get("/status", async (_req: Request, res: Response) => {
 // GET /api/sentinel/verdicts — full attestation history.
 router.get("/verdicts", (_req: Request, res: Response) => {
   res.json({ verdicts: getVerdicts() });
+});
+
+// ── POST /api/sentinel/validate — the rule engine as a PURE function ────────
+// Pre-flight check for proposed or existing configs (the MCP validate_config
+// tool rides this). Runs assessSnapshot on the submitted snapshot ONLY: no
+// attestation, no alert, no snapshot/verdict storage — same request, same
+// response, regardless of server state. Custody comes from the request or is
+// explicitly none; the operator's declarations store is never consulted, so a
+// public caller can't inherit declarations for an address they don't control.
+const VALIDATE_MAX_ROUTES = 30;
+const VALIDATE_CUSTODY_TYPES = new Set(["eoa_hot", "fireblocks_mpc", "safe_multisig", "unknown"]);
+const VALIDATE_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+
+router.post("/validate", async (req: Request, res: Response) => {
+  const bad = (error: string) => res.status(400).json({ error });
+  const body = req.body as Record<string, unknown> | undefined;
+  const s = body?.snapshot as Record<string, unknown> | undefined;
+  if (!s || typeof s !== "object") {
+    bad("body must be { snapshot, ticker?, custodyDeclaration? }");
+    return;
+  }
+  if (typeof s.oft !== "string" || !VALIDATE_ADDR_RE.test(s.oft)) {
+    bad("snapshot.oft must be a 0x-prefixed 40-hex address");
+    return;
+  }
+  if (typeof s.chainId !== "number" || !Number.isInteger(s.chainId)) {
+    bad("snapshot.chainId must be an integer chain id");
+    return;
+  }
+  if (!Array.isArray(s.routes)) {
+    bad("snapshot.routes must be an array");
+    return;
+  }
+  if (s.routes.length > VALIDATE_MAX_ROUTES) {
+    bad(`too many routes (${s.routes.length}) — max ${VALIDATE_MAX_ROUTES} per validation`);
+    return;
+  }
+  for (const r of s.routes) {
+    if (!r || typeof r !== "object" || typeof (r as Record<string, unknown>).eid !== "number") {
+      bad("every route needs at least a numeric eid");
+      return;
+    }
+  }
+  let custody: CustodyDeclaration | null = null;
+  const cd = body?.custodyDeclaration as Record<string, unknown> | undefined;
+  if (cd !== undefined) {
+    if (!cd || typeof cd !== "object" || !VALIDATE_CUSTODY_TYPES.has(String(cd.custodyType)) || typeof cd.declaredBy !== "string") {
+      bad(`custodyDeclaration must be { custodyType: ${[...VALIDATE_CUSTODY_TYPES].join(" | ")}, declaredBy }`);
+      return;
+    }
+    custody = {
+      custodyType: cd.custodyType as CustodyDeclaration["custodyType"],
+      declaredBy: cd.declaredBy,
+      declaredAt: typeof cd.declaredAt === "string" ? cd.declaredAt : new Date().toISOString().slice(0, 10),
+      verified: false,
+    };
+  }
+  // Missing optional fields become null — the engine already treats null as
+  // "unknown, never scored", so a partial agent-built config validates on
+  // exactly what it asserts.
+  const routeDefaults = {
+    chainKey: null, sendLibrary: null, sendLibIsDefault: null, receiveLibrary: null,
+    receiveLibIsDefault: null, uln: null, receiveUln: null, peer: null, peerAddress: null,
+    hasEnforcedOptions: null, isActive: true,
+  };
+  const snapshot = {
+    owner: null, ownerIsContract: null, proxyAdmin: null, proxyAdminOwner: null,
+    proxyAdminIsMultisig: null, proxyAdminOwnerIsContract: null,
+    ...s,
+    capturedAt: typeof s.capturedAt === "number" ? s.capturedAt : Date.now(),
+    routes: (s.routes as Array<Record<string, unknown>>).map((r) => ({
+      ...routeDefaults,
+      ...r,
+      chainName: typeof r.chainName === "string" && r.chainName !== "" ? r.chainName : `eid-${r.eid}`,
+    })),
+  } as unknown as OftSnapshot;
+  try {
+    const { findings, score, riskLevel, tis } = await assessSnapshot(
+      snapshot,
+      typeof body?.ticker === "string" ? body.ticker : undefined,
+      custody,
+    );
+    res.json({ score, riskLevel, findings, tis, rulesVersion: RULES_VERSION });
+  } catch (e: any) {
+    if (e instanceof MetadataUnavailableError) {
+      res.status(503).json({ error: "DVN metadata unavailable — try again shortly" });
+      return;
+    }
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // POST /api/sentinel/poll — run one live poll across all watched OFTs now.
