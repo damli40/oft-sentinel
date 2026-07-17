@@ -35,6 +35,19 @@ async function connectedClient() {
 describe("MCP server — list_fleet", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  // Pin the exact tool surface: names IN ORDER (reordering invalidates client
+  // prompt caches), schema property keys, and annotations. Update deliberately
+  // when a tool lands — never let this drift as a side effect.
+  it("pins the tool list — names, order, schema keys, annotations", async () => {
+    const client = await connectedClient();
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(["list_fleet"]);
+    const lf = tools[0];
+    expect(Object.keys((lf.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}).sort())
+      .toEqual(["chain", "risk"]);
+    expect(lf.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: true });
+  });
+
   it("advertises list_fleet as a read-only tool", async () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
