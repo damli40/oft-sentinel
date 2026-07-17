@@ -1,0 +1,11 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerListFleet } from "./tools/list-fleet.js";
+
+/** All six v1 tools are read+validate — the server never holds keys and never
+ *  writes chain state. That boundary is the product: an agent can check a
+ *  config here, but cannot be tricked into shipping one. */
+export function buildServer(): McpServer {
+  const server = new McpServer({ name: "oft-sentinel", version: "0.1.0" });
+  registerListFleet(server);
+  return server;
+}
