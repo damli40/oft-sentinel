@@ -41,3 +41,29 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  # Post-deploy smoke: a green build does not prove the app came up. Railway
+  # deploys main on its own timeline, so this polls prod for up to 10 minutes
+  # after tests pass and fails loudly if /health or /status never look sane.
+  # It verifies "prod is alive and serving a rulesVersion", not "this exact
+  # commit is live" — the backend doesn't expose its commit SHA (yet).
+  smoke:
+    if: github.event_name == 'push'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll prod health + status
+        run: |
+          BASE="https://backend-production-d16e.up.railway.app"
+          for i in $(seq 1 30); do
+            sleep 20
+            ok=$(curl -sf --max-time 10 "$BASE/api/health" | grep -c '"ok":true' || true)
+            rules=$(curl -sf --max-time 30 "$BASE/api/sentinel/status" | grep -o '"rulesVersion":"[^"]*"' | head -1 || true)
+            if [ "$ok" = "1" ] && [ -n "$rules" ]; then
+              echo "smoke OK after $((i*20))s: $rules"
+              exit 0
+            fi
+            echo "attempt $i/30: health=$ok rules='$rules'"
+          done
+          echo "prod failed smoke checks for 10 minutes after a push to main"
+          exit 1
