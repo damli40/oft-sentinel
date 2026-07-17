@@ -108,6 +108,61 @@ export function corridorSummary(entry: WatchedEntry): CorridorConfig[] {
   });
 }
 
+export interface HistoryRow {
+  oft: string;
+  chainId: number;
+  score: number;
+  riskLevel: RiskLevel;
+  capturedAt: number;
+}
+
+export interface VerdictRow {
+  oft: string;
+  chainId: number;
+  capturedAt: number;
+  verdict: string;
+  reasons: string[];
+  attestTxHash?: string | null;
+}
+
+export interface DriftRow {
+  capturedAt: number;
+  score: number;
+  riskLevel: RiskLevel;
+  event?: { verdict: string; reasons: string[]; attestTxHash: string | null };
+}
+
+/** Score history scoped to ONE oft+chain (the /history endpoint is address-only
+ *  and the same address deploys cross-chain), newest first, attested events
+ *  joined on capturedAt (verdict rows share the snapshot cycle's clock). */
+export function driftRows(
+  history: HistoryRow[],
+  verdicts: VerdictRow[],
+  address: string,
+  chainId: number,
+  limit: number,
+): DriftRow[] {
+  const needle = address.toLowerCase();
+  const events = new Map(
+    verdicts
+      .filter((v) => v.oft.toLowerCase() === needle && v.chainId === chainId)
+      .map((v) => [v.capturedAt, v]),
+  );
+  return history
+    .filter((h) => h.oft.toLowerCase() === needle && h.chainId === chainId)
+    .sort((a, b) => b.capturedAt - a.capturedAt)
+    .slice(0, limit)
+    .map((h) => {
+      const ev = events.get(h.capturedAt);
+      return {
+        capturedAt: h.capturedAt,
+        score: h.score,
+        riskLevel: h.riskLevel,
+        event: ev ? { verdict: ev.verdict, reasons: ev.reasons, attestTxHash: ev.attestTxHash ?? null } : undefined,
+      };
+    });
+}
+
 export type ResolveResult = { ok: true; entry: WatchedEntry } | { ok: false; error: string };
 
 /** Resolve address(+chain) against the watched fleet. The same OFT address is

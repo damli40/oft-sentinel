@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerListFleet } from "./tools/list-fleet.js";
 import { registerGetOftConfig } from "./tools/get-oft-config.js";
 import { registerGetVerdict } from "./tools/get-verdict.js";
+import { registerGetDriftHistory } from "./tools/get-drift-history.js";
 
 /** All six v1 tools are read+validate — the server never holds keys and never
  *  writes chain state. That boundary is the product: an agent can check a
@@ -12,5 +13,6 @@ export function buildServer(): McpServer {
   registerListFleet(server);
   registerGetOftConfig(server);
   registerGetVerdict(server);
+  registerGetDriftHistory(server);
   return server;
 }
