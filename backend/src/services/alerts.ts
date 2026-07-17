@@ -36,7 +36,21 @@ const SENTINEL_RPC = process.env.SENTINEL_RPC ?? "https://rpc.sepolia.mantle.xyz
 const AGENT_ID = BigInt(process.env.SENTINEL_AGENT_ID ?? 1);
 const NUDGE_MNT = "0.0001"; // dust nudge attached to the on-chain alert
 const SEPOLIA_EXPLORER = "https://sepolia.mantlescan.xyz";
-const MAINNET_EXPLORER = "https://mantlescan.xyz";
+
+// Explorer per WATCHED chain — the OFT address link must point at the chain the
+// asset lives on. Attestation/AlertBus links always stay on Mantle Sepolia
+// (SEPOLIA_EXPLORER): that is where Sentinel's contracts are, whatever the asset's chain.
+const CHAIN_EXPLORERS: Record<number, string> = {
+  1: "https://etherscan.io",
+  8453: "https://basescan.org",
+  5000: "https://mantlescan.xyz",
+};
+
+/** Address link on the watched chain's explorer; blockscan cross-chain search when unmapped. */
+export function oftExplorerUrl(chainId: number, address: string): string {
+  const base = CHAIN_EXPLORERS[chainId] ?? "https://blockscan.com";
+  return `${base}/address/${address}`;
+}
 
 const sentinelChain = defineChain({
   id: SENTINEL_CHAIN_ID,
@@ -209,7 +223,7 @@ export async function dispatchAlert(
     ``,
     DIV,
     `🔗 <b>On-chain</b>`,
-    `${link("OFT ↗", `${MAINNET_EXPLORER}/address/${v.oft}`)}  ·  ${
+    `${link("OFT ↗", oftExplorerUrl(v.chainId, v.oft))}  ·  ${
       v.attestTxHash ? link("Attestation ↗", `${SEPOLIA_EXPLORER}/tx/${v.attestTxHash}`) : "Attestation unavailable"
     }`,
     alertTxHash ? link("AlertBus ↗", `${SEPOLIA_EXPLORER}/tx/${alertTxHash}`) : "AlertBus unavailable",
@@ -225,7 +239,7 @@ export async function dispatchAlert(
     `Score: <b>${v.score}/100</b>`,
     `Reason: ${reasons}`,
     ``,
-    `OFT: ${link(v.oft, `${MAINNET_EXPLORER}/address/${v.oft}`)}`,
+    `OFT: ${link(v.oft, oftExplorerUrl(v.chainId, v.oft))}`,
     attestationLine,
     txLine,
   ].join("\n");
