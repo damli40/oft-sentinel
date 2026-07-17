@@ -3,6 +3,7 @@ import { registerListFleet } from "./tools/list-fleet.js";
 import { registerGetOftConfig } from "./tools/get-oft-config.js";
 import { registerGetVerdict } from "./tools/get-verdict.js";
 import { registerGetDriftHistory } from "./tools/get-drift-history.js";
+import { registerVerifyAttestation } from "./tools/verify-attestation.js";
 
 /** All six v1 tools are read+validate — the server never holds keys and never
  *  writes chain state. That boundary is the product: an agent can check a
@@ -14,5 +15,6 @@ export function buildServer(): McpServer {
   registerGetOftConfig(server);
   registerGetVerdict(server);
   registerGetDriftHistory(server);
+  registerVerifyAttestation(server);
   return server;
 }
