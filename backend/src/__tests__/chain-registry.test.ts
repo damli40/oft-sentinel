@@ -17,6 +17,8 @@ import {
 let dir: string;
 const savedPath = process.env.CHAIN_REGISTRY_PATH;
 const savedMantleRpc = process.env.MANTLE_RPC;
+const savedAlchemyKey = process.env.ALCHEMY_API_KEY;
+const savedDrpcKey = process.env.DRPC_API_KEY;
 
 function writeRegistry(chains: Record<string, unknown>): string {
   const file = join(dir, "chain-registry.json");
@@ -51,6 +53,8 @@ const oneProviderChain = {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "chainreg-"));
   delete process.env.MANTLE_RPC;
+  delete process.env.ALCHEMY_API_KEY;
+  delete process.env.DRPC_API_KEY;
 });
 
 afterEach(() => {
@@ -59,6 +63,10 @@ afterEach(() => {
   else process.env.CHAIN_REGISTRY_PATH = savedPath;
   if (savedMantleRpc === undefined) delete process.env.MANTLE_RPC;
   else process.env.MANTLE_RPC = savedMantleRpc;
+  if (savedAlchemyKey === undefined) delete process.env.ALCHEMY_API_KEY;
+  else process.env.ALCHEMY_API_KEY = savedAlchemyKey;
+  if (savedDrpcKey === undefined) delete process.env.DRPC_API_KEY;
+  else process.env.DRPC_API_KEY = savedDrpcKey;
   _resetChainRegistryCache();
 });
 
@@ -125,6 +133,95 @@ describe("MANTLE_RPC override", () => {
     const ref = getChainRef(5000)!;
     expect(ref.rpcs[0].url).toBe("https://rpc.mantle.xyz");
     expect(ref.rpcs.length).toBe(2);
+  });
+});
+
+describe("keyed provider overrides (ALCHEMY_API_KEY / DRPC_API_KEY)", () => {
+  const ethChain = {
+    chainKey: "ethereum",
+    eid: 30101,
+    chainId: 1,
+    eligible: true,
+    etherscanFree: true,
+    rpcs: [rpc("https://eth.merkle.io", "meowrpc"), rpc("https://ethereum-rpc.publicnode.com", "publicnode")],
+    note: "",
+  };
+
+  it("prepends a keyed alchemy endpoint for mapped chains, publics preserved behind it", () => {
+    process.env.ALCHEMY_API_KEY = "testkey";
+    writeRegistry({ ethereum: ethChain });
+    const ref = getChainRef(1)!;
+    expect(ref.rpcs[0]).toEqual({ url: "https://eth-mainnet.g.alchemy.com/v2/testkey", provider: "alchemy" });
+    expect(ref.rpcs.some((r) => r.url === "https://eth.merkle.io")).toBe(true);
+    expect(ref.rpcs.some((r) => r.url === "https://ethereum-rpc.publicnode.com")).toBe(true);
+  });
+
+  it("prepends a keyed drpc endpoint using the drpc network slug", () => {
+    process.env.DRPC_API_KEY = "dkey";
+    const baseChain = { ...ethChain, chainKey: "base", eid: 30184, chainId: 8453 };
+    writeRegistry({ base: baseChain });
+    const ref = getChainRef(8453)!;
+    expect(ref.rpcs[0]).toEqual({ url: "https://lb.drpc.live/base/dkey", provider: "drpc" });
+  });
+
+  it("with both keys set, order is alchemy (primary) then drpc (first quorum peer)", () => {
+    process.env.ALCHEMY_API_KEY = "akey";
+    process.env.DRPC_API_KEY = "dkey";
+    writeRegistry({ ethereum: ethChain });
+    const ref = getChainRef(1)!;
+    expect(ref.rpcs[0].provider).toBe("alchemy");
+    expect(ref.rpcs[1]).toEqual({ url: "https://lb.drpc.live/ethereum/dkey", provider: "drpc" });
+    expect(ref.rpcs.length).toBe(4);
+  });
+
+  it("leaves unmapped chains untouched even when keys are set", () => {
+    process.env.ALCHEMY_API_KEY = "akey";
+    process.env.DRPC_API_KEY = "dkey";
+    writeRegistry({ solo: oneProviderChain });
+    const ref = getChainRef(99999)!;
+    expect(ref.rpcs.map((r) => r.provider)).toEqual(["official", "official"]);
+  });
+
+  it("is a no-op when neither key is set", () => {
+    writeRegistry({ ethereum: ethChain });
+    const ref = getChainRef(1)!;
+    expect(ref.rpcs.length).toBe(2);
+    expect(ref.rpcs[0].provider).toBe("meowrpc");
+  });
+
+  it("MANTLE_RPC still wins rpcs[0] on mantle when keys are also set", () => {
+    process.env.ALCHEMY_API_KEY = "akey";
+    process.env.MANTLE_RPC = "https://custom-mantle.example/rpc";
+    writeRegistry({ mantle: twoProviderChain });
+    const ref = getChainRef(5000)!;
+    expect(ref.rpcs[0].url).toBe("https://custom-mantle.example/rpc");
+    expect(ref.rpcs.some((r) => r.url === "https://mantle-mainnet.g.alchemy.com/v2/akey")).toBe(true);
+  });
+
+  it("does not duplicate a keyed URL already present in the registry file", () => {
+    process.env.ALCHEMY_API_KEY = "akey";
+    const withKeyed = {
+      ...ethChain,
+      rpcs: [rpc("https://eth-mainnet.g.alchemy.com/v2/akey", "alchemy"), rpc("https://eth.merkle.io", "meowrpc")],
+    };
+    writeRegistry({ ethereum: withKeyed });
+    const ref = getChainRef(1)!;
+    expect(ref.rpcs.filter((r) => r.url.includes("alchemy")).length).toBe(1);
+  });
+
+  it("keyed providers count toward the quorum invariant", () => {
+    // One distinct public provider — ineligible on file rpcs alone; the keyed
+    // endpoint is a real second provider, so quorum is genuinely met.
+    process.env.ALCHEMY_API_KEY = "akey";
+    const thin = { ...ethChain, rpcs: [rpc("https://eth.merkle.io", "meowrpc")] };
+    writeRegistry({ ethereum: thin });
+    expect(getChainRef(1)?.eligible).toBe(true);
+  });
+
+  it("a thin chain stays ineligible without a key", () => {
+    const thin = { ...ethChain, rpcs: [rpc("https://eth.merkle.io", "meowrpc")] };
+    writeRegistry({ ethereum: thin });
+    expect(getChainRef(1)?.eligible).toBe(false);
   });
 });
 
