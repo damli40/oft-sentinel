@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseTeamTelegramContacts, telegramRecipients } from "../services/alerts.js";
+import { oftExplorerUrl, parseTeamTelegramContacts, telegramRecipients } from "../services/alerts.js";
 import type { SentinelVerdict } from "../types.js";
 
 const verdict: SentinelVerdict = {
@@ -13,6 +13,26 @@ const verdict: SentinelVerdict = {
   verdictHash: "0xabc",
   capturedAt: 1,
 };
+
+describe("OFT explorer links resolve per watched chain", () => {
+  const addr = "0x2222222222222222222222222222222222222222";
+
+  it("links Ethereum OFTs to etherscan", () => {
+    expect(oftExplorerUrl(1, addr)).toBe(`https://etherscan.io/address/${addr}`);
+  });
+
+  it("links Base OFTs to basescan", () => {
+    expect(oftExplorerUrl(8453, addr)).toBe(`https://basescan.org/address/${addr}`);
+  });
+
+  it("links Mantle OFTs to mantlescan", () => {
+    expect(oftExplorerUrl(5000, addr)).toBe(`https://mantlescan.xyz/address/${addr}`);
+  });
+
+  it("falls back to blockscan for a chain with no mapped explorer", () => {
+    expect(oftExplorerUrl(999999, addr)).toBe(`https://blockscan.com/address/${addr}`);
+  });
+});
 
 describe("Telegram alert routing", () => {
   afterEach(() => {
