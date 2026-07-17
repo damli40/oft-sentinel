@@ -63,6 +63,51 @@ function applyMantleRpcOverride(ref: ChainRef): ChainRef {
   return { ...ref, rpcs: [existing ?? promoted, ...rest] };
 }
 
+/** Keyed-endpoint overrides. When an env key is set, prepend that provider's
+ *  keyed endpoint for the networks the key has been verified against — keyed
+ *  endpoints are far more reliable than anonymous public ones, which is the
+ *  root cause of per-corridor read flakes. Keys live in env ONLY: the committed
+ *  registry stays public data, and rpc URLs are never serialized via the API.
+ *  Order: alchemy becomes the primary read client, keyed drpc the first
+ *  quorum/fallback peer, public endpoints remain as deeper fallbacks. */
+interface KeyedProvider {
+  envVar: string;
+  provider: string;
+  url: (network: string, key: string) => string;
+  /** chainId → provider-specific network slug; only verified networks belong here. */
+  networks: Record<number, string>;
+}
+
+const KEYED_PROVIDERS: KeyedProvider[] = [
+  {
+    envVar: "ALCHEMY_API_KEY",
+    provider: "alchemy",
+    url: (network, key) => `https://${network}.g.alchemy.com/v2/${key}`,
+    networks: { 1: "eth-mainnet", 8453: "base-mainnet", 5000: "mantle-mainnet" },
+  },
+  {
+    envVar: "DRPC_API_KEY",
+    provider: "drpc",
+    url: (network, key) => `https://lb.drpc.live/${network}/${key}`,
+    networks: { 1: "ethereum", 8453: "base", 5000: "mantle" },
+  },
+];
+
+function applyKeyedProviderOverrides(ref: ChainRef): ChainRef {
+  const existing = ref.rpcs ?? [];
+  const keyed: ChainRpc[] = [];
+  for (const p of KEYED_PROVIDERS) {
+    const key = process.env[p.envVar];
+    const network = p.networks[ref.chainId];
+    if (!key || !network) continue;
+    const url = p.url(network, key);
+    if (existing.some((r) => r.url === url)) continue;
+    keyed.push({ url, provider: p.provider });
+  }
+  if (keyed.length === 0) return ref;
+  return { ...ref, rpcs: [...keyed, ...existing] };
+}
+
 function load(): { byChainId: Map<number, ChainRef>; byKey: Map<string, ChainRef> } {
   const path = registryFile();
   if (cache && cache.path === path) return cache;
@@ -86,8 +131,11 @@ function load(): { byChainId: Map<number, ChainRef>; byKey: Map<string, ChainRef
     // Enforce the quorum invariant at load time: eligible only if the file says
     // so AND the endpoints actually satisfy ≥2-distinct-provider quorum. This
     // makes it impossible for a mislabeled registry to bypass invariant 3.
-    const eligible = entry.eligible && meetsQuorum(entry.rpcs ?? []);
-    const ref = applyMantleRpcOverride({ ...entry, eligible });
+    // Quorum is measured on the keyed-augmented list: a keyed endpoint is a
+    // real distinct provider, so it legitimately restores quorum.
+    const withKeyed = applyKeyedProviderOverrides(entry);
+    const eligible = entry.eligible && meetsQuorum(withKeyed.rpcs ?? []);
+    const ref = applyMantleRpcOverride({ ...withKeyed, eligible });
     byChainId.set(ref.chainId, ref);
     byKey.set(ref.chainKey, ref);
   }
