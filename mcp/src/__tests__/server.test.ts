@@ -42,7 +42,7 @@ describe("MCP server — list_fleet", () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual([
-      "list_fleet", "get_oft_config", "get_verdict", "get_drift_history", "verify_attestation",
+      "list_fleet", "get_oft_config", "get_verdict", "get_drift_history", "verify_attestation", "validate_config",
     ]);
     const schemaKeys = (t: (typeof tools)[number]) =>
       Object.keys((t.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}).sort();
@@ -51,6 +51,7 @@ describe("MCP server — list_fleet", () => {
     expect(schemaKeys(tools[2])).toEqual(["address", "chain"]);
     expect(schemaKeys(tools[3])).toEqual(["address", "chain", "limit"]);
     expect(schemaKeys(tools[4])).toEqual(["address", "attestationId", "chain"]);
+    expect(schemaKeys(tools[5])).toEqual(["config", "custodyType", "declaredBy", "ticker"]);
     for (const t of tools) {
       expect(t.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: true });
     }
