@@ -42,8 +42,47 @@ export const word = (hex: string) => hex.replace(/^0x/, "").toLowerCase().padSta
 export const boolWord = (b: boolean) => (b ? "1" : "0").padStart(64, "0");
 export const peersRet = (addr: string) => "0x" + word(addr);
 export const addrWord = (addr: string) => "0x" + word(addr);
-export const addrBoolRet = (addr: string, b: boolean) => "0x" + word(addr) + boolWord(b);
-export const enforcedEmpty = "0x" + "0".repeat(128);
+const addrBoolRet = (addr: string, b: boolean) => "0x" + word(addr) + boolWord(b);
+const enforcedEmpty = "0x" + "0".repeat(128);
+
+/** A peers() word of all zeroes — the on-chain shape of "no peer for this eid".
+ *  The COMMON case on a real sweep: ~100 of the ~120 known EIDs answer this. */
+export const ZERO_PEER = "0x" + "0".repeat(64);
+
+// ── Reverts that carry return data ───────────────────────────────────────────
+/**
+ * A handler return can be marked as a REVERT rather than a successful read.
+ *
+ * The distinction matters because a reverting sub-call is not the same as one
+ * returning nothing: real chains revert with a payload (`Error(string)` from a
+ * `require`, or a custom error), and Multicall3 reports that as
+ * `{success: false, returnData: <non-empty bytes>}`. A harness that can only
+ * emit `{success: false, returnData: "0x"}` cannot tell whether a decoder reads
+ * the `success` flag or merely checks for empty bytes — so the revert payload
+ * being mistaken for valid return data (and its last 20 bytes minted into an
+ * address) is invisible to it.
+ *
+ * `revertWith` is honoured on BOTH paths, so a fixture stays truthful whichever
+ * one the chain takes: multicallHandler maps it to a failed aggregate3 row, and
+ * makeFactory throws it, which is what viem does for a direct eth_call revert.
+ */
+const REVERT_MARK = "revert!";
+
+/** Mark a handler's return as a revert carrying `returnData` (may be "0x"). */
+export const revertWith = (returnData: string) => REVERT_MARK + returnData;
+
+/** The revert payload, or null if `r` is an ordinary successful return. */
+export function asRevert(r: string): string | null {
+  return r.startsWith(REVERT_MARK) ? r.slice(REVERT_MARK.length) : null;
+}
+
+/** Standard `Error(string)` revert payload — what `require(false, msg)` returns.
+ *  Non-empty bytes on a FAILED call, which is the discriminating case. */
+export function errorStringRevert(msg: string): string {
+  return revertWith(
+    "0x08c379a0" + encodeAbiParameters([{ type: "string" }], [msg]).slice(2),
+  );
+}
 
 /** UlnConfig-shaped bytes decodable by decodeUlnConfig; requiredDVNCount is the
  *  only field we vary (word index 4 = byte offset 128). */
@@ -96,7 +135,11 @@ export function makeFactory(specs: Record<string, FakeSpec>, log: string[]) {
       log.push(`${url}|${data.slice(0, 10)}`);
       const spec = specs[url];
       if (!spec) throw new Error("no fake for url " + url);
-      return { data: spec.handler(to, data) };
+      const out = spec.handler(to, data);
+      // A revert is an error on the per-call path — viem throws, it does not
+      // hand back the revert payload as if it were return data.
+      if (asRevert(out) !== null) throw new Error("execution reverted");
+      return { data: out };
     },
     async getBytecode() {
       return specs[url]?.ownerCode ?? "0x";
@@ -136,6 +179,14 @@ export function multicallHandler(inner: Handler): Handler {
     const calls = args![0] as readonly { target: Address; callData: string }[];
     const rows = calls.map((c) => {
       const r = inner(c.target, c.callData);
+      // An explicit revert (see revertWith / errorStringRevert) keeps its
+      // payload: success=false WITH non-empty returnData, which is what a real
+      // chain returns for `require(false, msg)` and the only shape that can
+      // tell a success-flag check apart from an empty-bytes check.
+      const reverted = asRevert(r);
+      if (reverted !== null) {
+        return { success: false, returnData: reverted as `0x${string}` };
+      }
       // Empty return == the sub-call produced nothing; model it as a revert,
       // which is how a real Multicall3 reports a failing sub-call.
       return r && r !== "0x"
@@ -191,15 +242,33 @@ export const manyEidMap = async () =>
 export const peerForEid = (eid: number) =>
   getAddress(("0x" + eid.toString(16).padStart(40, "0")) as Address);
 
-/** Wrap a handler so peers(eid) returns a peer unique to that EID. */
-export function perEidPeers(inner: Handler): Handler {
+/**
+ * Wrap a handler so peers(eid) returns a peer unique to that EID.
+ *
+ * `zeroFor` makes those EIDs answer an all-zero word instead — the on-chain
+ * "no peer here" reply, and the majority answer on a real full-EID sweep.
+ * `malformedFor` makes them answer an undecodable word, which is what a
+ * misbehaving RPC hands back; it must cost that corridor and nothing else.
+ */
+export function perEidPeers(
+  inner: Handler,
+  opts: { zeroFor?: Iterable<number>; malformedFor?: Iterable<number> } = {},
+): Handler {
+  const zero = new Set(opts.zeroFor ?? []);
+  const bad = new Set(opts.malformedFor ?? []);
   return (to, data) => {
     if (data.slice(0, 10) !== SEL.peers) return inner(to, data);
     const eid = parseInt(data.slice(10), 16);
+    if (bad.has(eid)) return MALFORMED_PEER;
+    if (zero.has(eid)) return ZERO_PEER;
     return "0x" + word(eid.toString(16).padStart(40, "0"));
   };
 }
-export const fakeEidMap = eidMapDep;
+
+/** Not hex — BigInt() throws SyntaxError on it. Some public RPCs really do
+ *  return junk like this, and it reaches the decoder verbatim on the per-call
+ *  path (no viem ABI decode in between). */
+export const MALFORMED_PEER = "0xZZZZ";
 export const dvnMetaDep = async () => ({ byChain: {}, deadByChain: {}, fetchedAt: Date.now() });
 
 export function deps(extra: Partial<ReadSnapshotDeps>): ReadSnapshotDeps {

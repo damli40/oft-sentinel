@@ -293,6 +293,29 @@ describe("aggregate3Batch", () => {
     ])).toEqual(["0xaa", null]);
   });
 
+  it("maps a REVERT THAT CARRIES DATA to null, not to its revert payload", async () => {
+    // The discriminating case for the success flag. Real chains revert with a
+    // payload — `Error(string)` from a require, or a custom error — so
+    // success=false arrives with non-empty returnData. Checking only for empty
+    // bytes reads that payload as a valid result: downstream it decodes to a
+    // library address or a peer, and a call that FAILED becomes a config the
+    // engine reports on. The success flag is the only thing separating them.
+    const errorString =
+      "0x08c379a0" +
+      "0000000000000000000000000000000000000000000000000000000000000020" +
+      "0000000000000000000000000000000000000000000000000000000000000004" +
+      "6f6f7073" + "0".repeat(56); // "oops"
+    const call = async () =>
+      encodeResults([
+        { success: false, returnData: errorString },
+        { success: true, returnData: "0xaa" },
+      ]);
+    expect(await aggregate3Batch(call, [
+      { target: A, callData: "0x01" },
+      { target: B, callData: "0x02" },
+    ])).toEqual([null, "0xaa"]);
+  });
+
   it("sends the batch to MULTICALL3_ADDRESS with the encoded payload", async () => {
     const seen: { to: Address; data: string }[] = [];
     const calls: Call[] = [

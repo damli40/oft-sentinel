@@ -914,12 +914,26 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     }));
     const peerResults = await resilientBatch(peerCalls);
     allEids.forEach((eid, i) => {
-      const r = peerResults[i];
-      if (r && r !== "0x" && BigInt(r) !== 0n) {
+      // Per-eid guard, as the pre-batching discovery loop had. Decoding is not
+      // total: BigInt() throws SyntaxError on a non-hex word and getAddress()
+      // throws on a malformed slice, and the per-call fallback path hands back
+      // whatever the RPC said verbatim (the batched path is mostly insulated by
+      // viem's decoder, but 16 eligible chains have no Multicall3 at all). One
+      // misbehaving RPC must cost that ONE corridor, not the whole snapshot —
+      // an unguarded throw here rejects readSnapshot for the entire token.
+      try {
+        const r = peerResults[i];
+        if (!r || r === "0x" || BigInt(r) === 0n) return;
+        // Decode BEFORE registering the corridor. Both statements can throw, so
+        // pushing first would leave a half-registered eid — in activeEids with
+        // no entry in peerAddresses — which reads downstream as a live corridor
+        // whose peer is null, the exact silent-wrong-answer this guard exists to
+        // prevent. Either the eid gets a peer or it gets nothing.
+        // peers() returns bytes32 — last 20 bytes are the peer OFT address.
+        const peer = getAddress("0x" + r.slice(-40));
         activeEids.push(eid);
-        // peers() returns bytes32 — last 20 bytes are the peer OFT address
-        peerAddresses[eid] = getAddress("0x" + r.slice(-40));
-      }
+        peerAddresses[eid] = peer;
+      } catch { /* no readable peer for this eid — treat as no corridor */ }
     });
     corridorCache.set(cacheKey, { at: Date.now(), eids: [...activeEids], peers: { ...peerAddresses } });
   }
