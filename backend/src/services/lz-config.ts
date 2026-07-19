@@ -5,6 +5,12 @@ import { fileURLToPath } from "url";
 import type { ChainRef, Sendability, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
 import { getChainRefByKey, normalizeProvider } from "./chain-registry.js";
 import { getBlockClaimVerification, stampDelivery } from "./block-claim-verifications.js";
+import {
+  aggregate3Batch,
+  mapLimit,
+  FALLBACK_CONCURRENCY,
+  type Call,
+} from "./multicall.js";
 
 // LayerZero V2 endpoint — same address on every EVM chain.
 export const ENDPOINT = "0x1a44076050125825900e736c501f859c50fE728c" as Address;
@@ -834,6 +840,109 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     throw new Error(`all RPCs failed for ${to} on chain ${chain.chainId} (etherscan unavailable)`);
   }
 
+  /**
+   * Batched sibling of resilientCall. One entry per input call, in input order.
+   *
+   * `null` == NO ANSWER for this sub-call. It does not distinguish "the chain
+   * said nothing" from "we never managed to ask", and it must not be read as
+   * either — it is exactly the old per-call decode-guard `catch`, and every
+   * caller in this file treats it as UNREAD. A null may never be decoded into
+   * `false`, `0`, an empty DVN set, or any other positive claim; that is the
+   * invariant, and it is what keeps a rate limit from clearing a CRITICAL (see
+   * isRevert's note).
+   *
+   * What a transport failure does NOT do is stop at the first null. A 429 or a
+   * timeout kills the WHOLE batch and escalates: the next client's batch, then
+   * per-call resilientCall (primary retry → every fallback → Etherscan where the
+   * chain supports it). Only when that entire chain is exhausted does the entry
+   * fall to `null`, via the `.catch(() => null)` below. So null is the terminal
+   * state of a fully-degraded read, not a shortcut past one — the escalation is
+   * the guarantee here, not the absence of nulls.
+   */
+  async function resilientBatch(calls: Call[]): Promise<(string | null)[]> {
+    if (calls.length === 0) return [];
+
+    if (chain.multicall3) {
+      let lastErr: unknown;
+      for (const client of [srcClient, ...fallbackClients]) {
+        try {
+          return await aggregate3Batch(
+            (to, data) => rawCall(client, to, data),
+            calls,
+          );
+        } catch (e) {
+          // Transport-level failure for this client — try the next one.
+          lastErr = e;
+        }
+      }
+      // The per-call path below answers correctly but spends the CU volume
+      // batching exists to save. A chain that lands here persistently (stale
+      // multicall3 flag, provider rejecting aggregate3) is invisible in the
+      // results — this line is the only signal, and the first thing to check
+      // when post-deploy CU numbers disagree with the projection.
+      console.warn(
+        `[lz-config] multicall batch failed on ${chain.chainKey} (${calls.length} calls), falling back to per-call: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+      );
+    }
+
+    // No Multicall3, or every client failed the batch. Per-call path, which
+    // carries its own retry/fallback/etherscan chain — bounded, so a failing
+    // batch cannot reintroduce the unbounded fan-out this change removes.
+    return mapLimit(calls, FALLBACK_CONCURRENCY, (c) =>
+      resilientCall(c.target, c.callData).catch(() => null),
+    );
+  }
+
+  /**
+   * Batch against an ARBITRARY client — the destination-side sibling of
+   * resilientBatch, which closes over the SOURCE chain's client list and so
+   * cannot be pointed at another chain.
+   *
+   * Destination reads use a bare rawCall today with no retry and no fallback
+   * chain, so on any failure this degrades to exactly that: one rawCall per
+   * call, null where the call did not answer. Both helpers share
+   * aggregate3Batch for the encode → chunk → call → decode loop; they differ
+   * only in what they do when a batch fails (walk the client list vs. degrade
+   * on the single client we have).
+   */
+  async function batchOnClient(
+    client: RpcClient,
+    hasMulticall: boolean,
+    chainKey: string,
+    calls: Call[],
+  ): Promise<(string | null)[]> {
+    if (calls.length === 0) return [];
+    if (hasMulticall) {
+      try {
+        return await aggregate3Batch((to, data) => rawCall(client, to, data), calls);
+      } catch (e) {
+        // Transport-level failure for the whole batch — fall through to
+        // per-call. Same observability rationale as resilientBatch's warn.
+        console.warn(
+          `[lz-config] multicall batch failed on dst ${chainKey} (${calls.length} calls), falling back to per-call: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    return mapLimit(calls, FALLBACK_CONCURRENCY, (c) =>
+      rawCall(client, c.target, c.callData).catch(() => null),
+    );
+  }
+
+  /**
+   * One client per destination RPC URL. makeClient(dstRpc) used to run once PER
+   * ROUTE, so ten corridors into the same destination chain built ten clients
+   * (and ten connection pools) for one endpoint.
+   */
+  const dstClients = new Map<string, RpcClient>();
+  function dstClientFor(url: string): RpcClient {
+    let c = dstClients.get(url);
+    if (!c) {
+      c = makeClient(url);
+      dstClients.set(url, c);
+    }
+    return c;
+  }
+
   const [dvnMeta, eidMap] = await Promise.all([dvnMetaLoader(), eidMapLoader()]);
 
   // The source chain's chainKey — used for DVN name resolution of send-side
@@ -847,11 +956,11 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   // Falls back to sweeping ALL known V2 EVM EIDs when Etherscan is unavailable
   // for this chain, errors, or returns nothing — a missed corridor would blind
   // the monitor, so omission always degrades to the exhaustive path, never to
-  // silence. Batched to 25 concurrent calls to avoid RPC rate-limiting.
-  // Skipped entirely on a corridor-cache hit (see CORRIDOR_TTL_MS).
+  // silence. Read through resilientBatch: one Multicall3 round-trip per
+  // MULTICALL_CHUNK_SIZE where the chain supports it, otherwise a bounded
+  // per-call sweep. Skipped entirely on a corridor-cache hit (see CORRIDOR_TTL_MS).
   const activeEids: number[] = [];
   const peerAddresses: Record<number, string> = {};
-  const EID_BATCH = 25;
 
   const cacheKey = `${chain.chainId}:${oftAddr}`;
   const cached = corridorCache.get(cacheKey);
@@ -868,20 +977,33 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     if (discovered?.size) {
       console.log(`[lz-config] ${oft}: ${allEids.length} candidate corridors via PeerSet logs (skipping full sweep)`);
     }
-    for (let i = 0; i < allEids.length; i += EID_BATCH) {
-      await Promise.all(
-        allEids.slice(i, i + EID_BATCH).map(async (eid) => {
-          try {
-            const r = await resilientCall(oftAddr, SEL.peers + padU32(eid));
-            if (r && r !== "0x" && BigInt(r) !== 0n) {
-              activeEids.push(eid);
-              // peers() returns bytes32 — last 20 bytes are the peer OFT address
-              peerAddresses[eid] = getAddress("0x" + r.slice(-40));
-            }
-          } catch { /* no peer for this eid */ }
-        })
-      );
-    }
+    const peerCalls: Call[] = allEids.map((eid) => ({
+      target: oftAddr,
+      callData: SEL.peers + padU32(eid),
+    }));
+    const peerResults = await resilientBatch(peerCalls);
+    allEids.forEach((eid, i) => {
+      // Per-eid guard, as the pre-batching discovery loop had. Decoding is not
+      // total: BigInt() throws SyntaxError on a non-hex word and getAddress()
+      // throws on a malformed slice, and the per-call fallback path hands back
+      // whatever the RPC said verbatim (the batched path is mostly insulated by
+      // viem's decoder, but 16 eligible chains have no Multicall3 at all). One
+      // misbehaving RPC must cost that ONE corridor, not the whole snapshot —
+      // an unguarded throw here rejects readSnapshot for the entire token.
+      try {
+        const r = peerResults[i];
+        if (!r || r === "0x" || BigInt(r) === 0n) return;
+        // Decode BEFORE registering the corridor. Both statements can throw, so
+        // pushing first would leave a half-registered eid — in activeEids with
+        // no entry in peerAddresses — which reads downstream as a live corridor
+        // whose peer is null, the exact silent-wrong-answer this guard exists to
+        // prevent. Either the eid gets a peer or it gets nothing.
+        // peers() returns bytes32 — last 20 bytes are the peer OFT address.
+        const peer = getAddress("0x" + r.slice(-40));
+        activeEids.push(eid);
+        peerAddresses[eid] = peer;
+      } catch { /* no readable peer for this eid — treat as no corridor */ }
+    });
     corridorCache.set(cacheKey, { at: Date.now(), eids: [...activeEids], peers: { ...peerAddresses } });
   }
 
@@ -900,56 +1022,100 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
 
   const liveClients = [srcClient, ...fallbackClients];
 
-  await Promise.all(
-    activeEids.map(async (eid) => {
-      const chainInfo = eidMap[eid];
-      const route: RouteSnapshot = {
-        eid,
-        chainName: chainInfo?.chainKey ?? `eid-${eid}`,
-        chainKey: chainInfo?.chainKey ?? null,
-        sendLibrary: null,
-        sendLibIsDefault: null,
-        receiveLibrary: null,
-        receiveLibIsDefault: null,
-        uln: null,
-        receiveUln: null,
-        peer: peerAddresses[eid] ?? null,
-        peerAddress: peerAddresses[eid] ?? null,
-        hasEnforcedOptions: null,
-        isActive: true,
-      };
+  // Build every route shell up front, so batch results can be assigned by index.
+  // This is the largest fan-out in the read path — ~6 eth_calls per corridor,
+  // times every corridor, times every OFT. Batched it is two round trips per OFT
+  // (plus chunking), and the answer must be byte-identical either way.
+  const routeList: RouteSnapshot[] = activeEids.map((eid) => {
+    const chainInfo = eidMap[eid];
+    return {
+      eid,
+      chainName: chainInfo?.chainKey ?? `eid-${eid}`,
+      chainKey: chainInfo?.chainKey ?? null,
+      sendLibrary: null,
+      sendLibIsDefault: null,
+      receiveLibrary: null,
+      receiveLibIsDefault: null,
+      uln: null,
+      receiveUln: null,
+      peer: peerAddresses[eid] ?? null,
+      peerAddress: peerAddresses[eid] ?? null,
+      hasEnforcedOptions: null,
+      isActive: true,
+    };
+  });
 
-      try {
-        route.sendLibrary = decodeAddr(
-          await resilientCall(ENDPOINT, SEL.getSendLibrary + padAddr(oftAddr) + padU32(eid))
-        );
-      } catch { /* null */ }
+  // ── Wave 1: the four reads that depend on no prior result ─────────────────
+  // Two waves rather than one because the send-side ULN getConfig needs the
+  // library address that getSendLibrary returns. Everything address-independent
+  // goes first.
+  const w1: Call[] = [];
+  for (const r of routeList) {
+    w1.push({ target: ENDPOINT, callData: SEL.getSendLibrary + padAddr(oftAddr) + padU32(r.eid) });
+    w1.push({ target: ENDPOINT, callData: SEL.isDefaultSendLibrary + padAddr(oftAddr) + padU32(r.eid) });
+    w1.push({ target: ENDPOINT, callData: SEL.getReceiveLibrary + padAddr(oftAddr) + padU32(r.eid) });
+    // enforcedOptions msgType 1 (lzReceive). Non-empty bytes = options set.
+    w1.push({ target: oftAddr, callData: SEL.enforcedOptions + padU32(r.eid) + padU32(1) });
+  }
+  const w1res = await resilientBatch(w1);
 
-      try {
-        const r = await resilientCall(ENDPOINT, SEL.isDefaultSendLibrary + padAddr(oftAddr) + padU32(eid));
-        route.sendLibIsDefault = r && r !== "0x" ? BigInt(r) !== 0n : null;
-      } catch { /* null */ }
+  routeList.forEach((route, i) => {
+    const base = i * 4;
+    const sendLib = w1res[base];
+    const isDef = w1res[base + 1];
+    const recvLib = w1res[base + 2];
+    const enf = w1res[base + 3];
 
+    // A null here is exactly the old `catch { /* null */ }` branch: we did not
+    // get an answer, so the field stays unread. Each decode keeps its own guard
+    // because each can throw independently, and one unreadable field must not
+    // cost the other three.
+    if (sendLib) { try { route.sendLibrary = decodeAddr(sendLib); } catch { /* null */ } }
+    // Reproduces `r && r !== "0x" ? BigInt(r) !== 0n : null` exactly:
+    // resilientBatch already maps an empty return to null.
+    if (isDef) { try { route.sendLibIsDefault = BigInt(isDef) !== 0n; } catch { /* null */ } }
+    if (recvLib) {
       try {
-        const [lib, isDefault] = decodeAddressBool(
-          await resilientCall(ENDPOINT, SEL.getReceiveLibrary + padAddr(oftAddr) + padU32(eid))
-        );
+        const [lib, isDefault] = decodeAddressBool(recvLib);
         route.receiveLibrary = lib;
         route.receiveLibIsDefault = isDefault;
       } catch { /* null */ }
+    }
+    // A null MUST stay null, never false. `false` is the positive claim "this
+    // route has no enforced options", and we did not read that — we failed to
+    // read anything. decodeBytesNonEmpty is null-safe, but calling it on a null
+    // and letting the result stand would be the same mistake in a different
+    // place, so the guard is explicit.
+    if (enf) { try { route.hasEnforcedOptions = decodeBytesNonEmpty(enf); } catch { /* null */ } }
+  });
 
-      if (route.sendLibrary) {
-        try {
-          route.uln = decodeUlnConfig(
-            await resilientCall(ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
-          );
-        } catch { /* null */ }
-      }
+  // ── Wave 2: send-side ULN, which needs wave 1's library address ───────────
+  const w2routes = routeList.filter((r) => r.sendLibrary);
+  const w2: Call[] = w2routes.map((r) => ({
+    target: ENDPOINT,
+    callData: SEL.getConfig + padAddr(oftAddr) + padAddr(r.sendLibrary!) + padU32(r.eid) + padU32(2),
+  }));
+  const w2res = await resilientBatch(w2);
+  w2routes.forEach((route, i) => {
+    const raw = w2res[i];
+    if (raw) { try { route.uln = decodeUlnConfig(raw); } catch { /* null */ } }
+  });
+
+  await Promise.all(
+    routeList.map(async (route) => {
+      const eid = route.eid;
+      const chainInfo = eidMap[eid];
 
       // ── RPC source-conflict check ────────────────────────────────────────
-      // Cross-check the send-side ULN against a secondary Mantle RPC.
+      // Cross-check the send-side ULN against a secondary, DIFFERENT-provider RPC.
       // Disagreement on requiredDVNs / counts / optionalDVNThreshold flags the route
       // as potentially manipulated — surfaced as CRITICAL in assessSnapshot.
+      //
+      // This one stays on the individual path deliberately. resilientBatch reads
+      // from the primary client (falling through the client list only on transport
+      // failure), so batching this call would have the primary corroborate itself:
+      // the check would still run, still pass, and never detect a conflict again.
+      // The whole point is that a SECOND provider answers it.
       if (route.sendLibrary && route.uln && secondaryClient) {
         try {
           const fbUln = decodeUlnConfig(
@@ -968,53 +1134,20 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
         } catch { /* secondary unavailable — skip check */ }
       }
 
-      // ── Enforced options ────────────────────────────────────────────────
-      try {
-        // Check msgType 1 (lzReceive). Non-zero / non-empty bytes = options set.
-        const enf = await resilientCall(oftAddr, SEL.enforcedOptions + padU32(eid) + padU32(1));
-        route.hasEnforcedOptions = decodeBytesNonEmpty(enf);
-      } catch { /* null */ }
-
-      // ── Step 3: destination-side receive ULN (for mismatch detection) ────
-      // Destination RPC comes from the registry now (every eligible chain), not
-      // the old 22-entry curated map. Unknown / ineligible destination → skip the
-      // mismatch check (behaviour preserved: no RPC known ⇒ receiveUln stays null).
+      // The destination chain's RPC and its own endpoint address (varies by
+      // chain). Unknown / ineligible destination → nothing destination-side can
+      // be read at all, and every destination field stays null.
+      //
+      // The receive ULN and the reverse-peer check used to live here too; they
+      // are batched per destination chain after this loop. Delivery accounting
+      // stays per route because its destination read is gated on the SOURCE
+      // chain's outboundNonce, which this loop has just read.
       const peerAddr = peerAddresses[eid];
       const dstRpc = chainInfo?.chainKey ? getChainRefByKey(chainInfo.chainKey)?.rpcs[0]?.url : undefined;
-      // Use the destination chain's own endpoint address (varies by chain).
       const dstEndpoint = (chainInfo?.endpoint ?? ENDPOINT) as Address;
       if (peerAddr && dstRpc) {
         const peerAddrChecked = getAddress(peerAddr) as Address;
-        const dstClient = makeClient(dstRpc);
-
-        try {
-          // Reverse direction: read the peer's receive config for messages coming
-          // FROM this source chain — so the source EID here is chain.eid.
-          const [recvLib] = decodeAddressBool(
-            await rawCall(dstClient, dstEndpoint, SEL.getReceiveLibrary + padAddr(peerAddrChecked) + padU32(chain.eid))
-          );
-          if (recvLib) {
-            route.receiveUln = decodeUlnConfig(
-              await rawCall(dstClient, dstEndpoint, SEL.getConfig + padAddr(peerAddrChecked) + padAddr(recvLib) + padU32(chain.eid) + padU32(2))
-            );
-          }
-        } catch { /* receiveUln stays null */ }
-
-        // ── Reverse peer: is this corridor wired in BOTH directions? ─────────
-        // setPeer is one-directional. If the source peers to the destination but the
-        // destination does not peer back, quoteSend still succeeds (it only reads the
-        // source's own peer mapping), tokens still leave — and lzReceive reverts on
-        // _getPeerOrRevert forever. LZ documents this as the "NotInitializable" /
-        // Blocked class. Teams wire chains one direction at a time, so this is
-        // predicted to be common, and it is invisible to every other check we run.
-        try {
-          const back = await rawCall(dstClient, peerAddrChecked, SEL.peers + padU32(chain.eid));
-          if (back && back !== "0x") {
-            const backAddr = BigInt(back) === 0n ? null : getAddress("0x" + back.slice(-40));
-            route.reversePeer = backAddr;
-            route.peerSymmetric = backAddr !== null && backAddr.toLowerCase() === oftAddr.toLowerCase();
-          }
-        } catch { /* peerSymmetric stays null — unread, never assume unset */ }
+        const dstClient = dstClientFor(dstRpc);
 
         // ── Delivery accounting: what actually crossed ───────────────────────
         // sent (source outboundNonce) vs delivered (destination inboundNonce). No rule
@@ -1057,6 +1190,105 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       routes.push(route);
     })
   );
+
+  // ── Step 3c: destination-side reads, grouped by destination chain ─────────
+  // Three reads per route (receive library, receive ULN, reverse peer) against a
+  // client that was rebuilt for every single route. Now: one client and two
+  // batched waves per DESTINATION chain, covering all of that chain's routes.
+  //
+  // ⚠️ Two FILTERED index spaces are created here, and neither lines up with
+  // routeList:
+  //   `jobs`       — routes with a peer AND a destination the registry resolves
+  //   `needConfig` — of those, the ones whose receive library actually decoded
+  // Results are assigned back over the list they were BUILT from, never over
+  // routeList. Indexing wave 1 over routeList, or wave 2 over jobs, silently
+  // hands a corridor the receive config of a route on a different chain — and
+  // the receive config is what decides whether a message can be delivered.
+  type DstJob = { route: RouteSnapshot; peer: Address; endpoint: Address };
+  const byDstChain = new Map<string, { ref: ChainRef; jobs: DstJob[] }>();
+
+  for (const route of routeList) {
+    const peerAddr = peerAddresses[route.eid];
+    if (!peerAddr || !route.chainKey) continue;
+    const ref = getChainRefByKey(route.chainKey);
+    // No RPC known for this destination ⇒ every destination field stays null,
+    // and the engine falls back to `inferred` rather than asserting anything.
+    if (!ref?.rpcs[0]?.url) continue;
+    const bucket = byDstChain.get(route.chainKey) ?? { ref, jobs: [] };
+    bucket.jobs.push({
+      route,
+      peer: getAddress(peerAddr) as Address,
+      // The destination's OWN endpoint address, kept PER JOB rather than per
+      // bucket: two eids sharing a chainKey must not inherit each other's
+      // endpoint. Multicall3 carries a target per sub-call, so a batch with
+      // mixed targets is fine.
+      endpoint: (eidMap[route.eid]?.endpoint ?? ENDPOINT) as Address,
+    });
+    byDstChain.set(route.chainKey, bucket);
+  }
+
+  await Promise.all([...byDstChain.values()].map(async ({ ref, jobs }) => {
+    const dstClient = dstClientFor(ref.rpcs[0].url);
+    const hasMc = ref.multicall3;
+
+    // Wave 1: receive library + reverse peer. Neither depends on a prior result.
+    const d1: Call[] = [];
+    for (const j of jobs) {
+      // Reverse direction: the peer's receive config for messages coming FROM
+      // this source chain, so the EID argument is chain.eid.
+      d1.push({ target: j.endpoint, callData: SEL.getReceiveLibrary + padAddr(j.peer) + padU32(chain.eid) });
+      d1.push({ target: j.peer, callData: SEL.peers + padU32(chain.eid) });
+    }
+    const d1res = await batchOnClient(dstClient, hasMc, ref.chainKey, d1);
+
+    const needConfig: { job: DstJob; recvLib: string }[] = [];
+    jobs.forEach((j, i) => {
+      const rawRecv = d1res[i * 2];
+      const back = d1res[i * 2 + 1];
+
+      // A null is the old `catch { /* receiveUln stays null */ }` branch: we did
+      // not get an answer. Each decode keeps its own guard, because one
+      // unreadable field must not cost the other.
+      if (rawRecv) {
+        try {
+          const [recvLib] = decodeAddressBool(rawRecv);
+          if (recvLib) needConfig.push({ job: j, recvLib });
+        } catch { /* receiveUln stays null */ }
+      }
+
+      // ── Reverse peer: is this corridor wired in BOTH directions? ───────────
+      // setPeer is one-directional. If the source peers to the destination but
+      // the destination does not peer back, quoteSend still succeeds (it only
+      // reads the source's own peer mapping), tokens still leave — and
+      // lzReceive reverts on _getPeerOrRevert forever. LZ documents this as the
+      // "NotInitializable" / Blocked class. Teams wire chains one direction at a
+      // time, so this is predicted to be common, and it is invisible to every
+      // other check we run.
+      //
+      // Unread stays NULL, never false. `false` is the positive claim "the
+      // destination does not peer back", which is itself a finding; null means
+      // we did not look.
+      if (back && back !== "0x") {
+        try {
+          const backAddr = BigInt(back) === 0n ? null : getAddress("0x" + back.slice(-40));
+          j.route.reversePeer = backAddr;
+          j.route.peerSymmetric = backAddr !== null && backAddr.toLowerCase() === oftAddr.toLowerCase();
+        } catch { /* peerSymmetric stays null — unread, never assume unset */ }
+      }
+    });
+
+    // Wave 2: the receive ULN, which needs wave 1's library address. Indexed
+    // over needConfig — the list these calls were built from.
+    const d2: Call[] = needConfig.map(({ job, recvLib }) => ({
+      target: job.endpoint,
+      callData: SEL.getConfig + padAddr(job.peer) + padAddr(recvLib) + padU32(chain.eid) + padU32(2),
+    }));
+    const d2res = await batchOnClient(dstClient, hasMc, ref.chainKey, d2);
+    needConfig.forEach(({ job }, i) => {
+      const raw = d2res[i];
+      if (raw) { try { job.route.receiveUln = decodeUlnConfig(raw); } catch { /* null */ } }
+    });
+  }));
 
   // ── Step 4: owner + EIP-1967 proxy admin ─────────────────────────────────
   let owner: string | null = null;

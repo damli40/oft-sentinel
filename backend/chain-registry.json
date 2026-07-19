@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-08T20:12:09.815Z",
-  "source": "https://metadata.layerzero-api.com/v1/metadata/deployments + verified RPC sweep (/Users/Admin/Desktop/oft-audit-product/docs/superpowers/specs/2026-07-08-chain-rpc-sweep.json)",
+  "generatedAt": "2026-07-19T02:01:02.909Z",
+  "source": "https://metadata.layerzero-api.com/v1/metadata/deployments + verified RPC sweep (/Users/Admin/Desktop/oft-audit-product/.worktrees/multicall-batching/docs/superpowers/specs/2026-07-08-chain-rpc-sweep.json)",
   "chains": {
     "abstract": {
       "chainKey": "abstract",
@@ -8,6 +8,7 @@
       "chainId": 2741,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://api.mainnet.abs.xyz",
@@ -34,6 +35,7 @@
       "chainId": 69000,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://public-rpc.anime.xyz",
@@ -48,6 +50,7 @@
       "chainId": 33139,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://apechain.drpc.org",
@@ -66,6 +69,7 @@
       "chainId": 9069,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.nexus.mainnet.apexfusion.org",
@@ -80,6 +84,7 @@
       "chainId": 42161,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://arbitrum-one-rpc.publicnode.com",
@@ -106,6 +111,7 @@
       "chainId": 5042,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [],
       "note": "Arc mainnet (chain id 5042) has no public RPC yet; Circle docs (docs.arc.io) confirm only Arc Testnet (5042002) endpoints are published as of Jul 2026 ('Mainnet endpoints... published separately when available'). 0 verified."
     },
@@ -115,6 +121,7 @@
       "chainId": 592,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://evm.astar.network",
@@ -137,6 +144,7 @@
       "chainId": 904,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [],
       "note": "Ault Blockchain (Cosmos+EVM L1) has no free/keyless public RPC found; only paid Quicknode infra is documented. 0 verified."
     },
@@ -146,6 +154,7 @@
       "chainId": 1313161554,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet.aurora.dev",
@@ -172,6 +181,7 @@
       "chainId": 43114,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://avalanche-mainnet.gateway.tenderly.co",
@@ -198,6 +208,7 @@
       "chainId": 5165,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc1.bahamut.io",
@@ -220,6 +231,7 @@
       "chainId": 8453,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://gateway.tenderly.co/public/base",
@@ -246,6 +258,7 @@
       "chainId": 2525,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://2525.rpc.thirdweb.com",
@@ -260,6 +273,7 @@
       "chainId": 4337,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://subnets.avax.network/beam/mainnet/rpc",
@@ -282,6 +296,7 @@
       "chainId": 80094,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.berachain.com",
@@ -308,6 +323,7 @@
       "chainId": 11501,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc-mainnet-2.geb.network",
@@ -326,6 +342,7 @@
       "chainId": 200901,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/bitlayer",
@@ -352,6 +369,7 @@
       "chainId": 81457,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://blast.gateway.tenderly.co",
@@ -378,6 +396,7 @@
       "chainId": 60808,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://bob.gateway.tenderly.co",
@@ -404,6 +423,7 @@
       "chainId": 3637,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/botanix_mainnet",
@@ -422,6 +442,7 @@
       "chainId": 6001,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://fullnode-mainnet.bouncebitapi.com",
@@ -436,6 +457,7 @@
       "chainId": 56,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://bsc-rpc.publicnode.com",
@@ -462,6 +484,7 @@
       "chainId": 484,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc-mainnet.campnetwork.xyz",
@@ -476,6 +499,7 @@
       "chainId": 7700,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://canto.gravitychain.io",
@@ -494,6 +518,7 @@
       "chainId": 42220,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/celo",
@@ -520,6 +545,7 @@
       "chainId": 88888,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/chiliz",
@@ -542,6 +568,7 @@
       "chainId": 4114,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.mainnet.citrea.xyz",
@@ -556,6 +583,7 @@
       "chainId": 81224,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.codex.xyz",
@@ -570,6 +598,7 @@
       "chainId": 12739,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [],
       "note": "Concrete's own LayerZero OFT quickstart doc uses a literal 'https://INSERT-RPC' placeholder (no public RPC documented). Only candidate found (Tenderly gateway) requires an access-token path segment. 0 verified."
     },
@@ -579,6 +608,7 @@
       "chainId": 1030,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://evm.confluxrpc.com",
@@ -601,6 +631,7 @@
       "chainId": 432,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.nutriemp.com",
@@ -619,6 +650,7 @@
       "chainId": 1116,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/core",
@@ -645,6 +677,7 @@
       "chainId": 25,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://1rpc.io/cro",
@@ -671,6 +704,7 @@
       "chainId": 388,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://cronos-zkevm.drpc.org",
@@ -693,6 +727,7 @@
       "chainId": 7560,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.cyber.co",
@@ -711,6 +746,7 @@
       "chainId": 666666666,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.degen.tips",
@@ -733,6 +769,7 @@
       "chainId": 432204,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://subnets.avax.network/dexalot/mainnet/rpc",
@@ -751,6 +788,7 @@
       "chainId": 53935,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://subnets.avax.network/defi-kingdoms/dfk-chain/rpc",
@@ -773,6 +811,7 @@
       "chainId": 202110,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://subnets.avax.network/dinari/mainnet/rpc",
@@ -787,6 +826,7 @@
       "chainId": 68770,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://68770.rpc.thirdweb.com",
@@ -801,6 +841,7 @@
       "chainId": 97477,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://doma.drpc.org",
@@ -817,13 +858,10 @@
       "chainKey": "dos",
       "eid": 30149,
       "chainId": 7979,
-      "eligible": true,
+      "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
-        {
-          "url": "https://main.doschain.com",
-          "provider": "official"
-        },
         {
           "url": "https://7979.rpc.thirdweb.com",
           "provider": "thirdweb"
@@ -837,6 +875,7 @@
       "chainId": 98881,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://98881.rpc.thirdweb.com",
@@ -851,6 +890,7 @@
       "chainId": 41923,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.edu-chain.raas.gelato.cloud",
@@ -869,6 +909,7 @@
       "chainId": 7332,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/horizen_eon",
@@ -887,6 +928,7 @@
       "chainId": 5064014,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ethereal.trade",
@@ -901,6 +943,7 @@
       "chainId": 1,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet.gateway.tenderly.co",
@@ -927,6 +970,7 @@
       "chainId": 42793,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/etherlink_mainnet",
@@ -949,6 +993,7 @@
       "chainId": 250,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://fantom.drpc.org",
@@ -975,6 +1020,7 @@
       "chainId": 14,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://flare-api.flare.network/ext/C/rpc",
@@ -997,6 +1043,7 @@
       "chainId": 747,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet.evm.nodes.onflow.org",
@@ -1015,6 +1062,7 @@
       "chainId": 252,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://fraxtal.gateway.tenderly.co",
@@ -1041,6 +1089,7 @@
       "chainId": 122,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://fuse.drpc.org",
@@ -1067,6 +1116,7 @@
       "chainId": 10088,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://gatelayer-mainnet.gatenode.cc",
@@ -1081,6 +1131,7 @@
       "chainId": 685689,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://gensyn-mainnet.g.alchemy.com/public",
@@ -1095,6 +1146,7 @@
       "chainId": 1300,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://1300.rpc.thirdweb.com",
@@ -1109,6 +1161,7 @@
       "chainId": 100,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.gnosischain.com",
@@ -1135,6 +1188,7 @@
       "chainId": 2345,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/goat_mainnet",
@@ -1157,6 +1211,7 @@
       "chainId": 1625,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/gravity",
@@ -1183,6 +1238,7 @@
       "chainId": 43419,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.gunzchain.io/ext/bc/2M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFML/rpc",
@@ -1201,6 +1257,7 @@
       "chainId": 1666600000,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://api.harmony.one",
@@ -1227,6 +1284,7 @@
       "chainId": 295,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet.hashio.io/api",
@@ -1249,6 +1307,7 @@
       "chainId": 43111,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.hemi.network/rpc",
@@ -1271,6 +1330,7 @@
       "chainId": 19011,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.mainnet.oasys.homeverse.games",
@@ -1293,6 +1353,7 @@
       "chainId": 26514,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://horizen.calderachain.xyz/http",
@@ -1311,6 +1372,7 @@
       "chainId": 1992,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://1992.rpc.thirdweb.com",
@@ -1325,6 +1387,7 @@
       "chainId": 6985385,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://humanity-mainnet.g.alchemy.com/public",
@@ -1343,6 +1406,7 @@
       "chainId": 999,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://hyperliquid.drpc.org",
@@ -1369,6 +1433,7 @@
       "chainId": 1776,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://sentry.evm-rpc.injective.network",
@@ -1391,6 +1456,7 @@
       "chainId": 57073,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc-qnd.inkonchain.com",
@@ -1417,6 +1483,7 @@
       "chainId": 8822,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://json-rpc.evm.iotaledger.net",
@@ -1439,6 +1506,7 @@
       "chainId": 3282,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://mainnet-beta-rpc.irys.xyz/v1/execution-rpc",
@@ -1457,6 +1525,7 @@
       "chainId": 1480,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.vana.org",
@@ -1471,6 +1540,7 @@
       "chainId": 81,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc-2.japanopenchain.org:8545",
@@ -1489,6 +1559,7 @@
       "chainId": 747474,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.katana.network",
@@ -1515,6 +1586,7 @@
       "chainId": 2222,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://kava-evm-rpc.publicnode.com",
@@ -1541,6 +1613,7 @@
       "chainId": 2366,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/kite_mainnet",
@@ -1563,6 +1636,7 @@
       "chainId": 8217,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://klaytn.drpc.org",
@@ -1589,6 +1663,7 @@
       "chainId": 232,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.lens.xyz",
@@ -1611,6 +1686,7 @@
       "chainId": 1890,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://replicator.phoenix.lightlink.io/rpc/v1",
@@ -1629,6 +1705,7 @@
       "chainId": 59144,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://linea.drpc.org",
@@ -1655,6 +1732,7 @@
       "chainId": 1135,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://lisk.gateway.tenderly.co",
@@ -1677,6 +1755,7 @@
       "chainId": 5151706,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://5151706.rpc.thirdweb.com/",
@@ -1691,6 +1770,7 @@
       "chainId": 957,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.lyra.finance",
@@ -1709,6 +1789,7 @@
       "chainId": 169,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://manta-pacific.drpc.org",
@@ -1735,6 +1816,7 @@
       "chainId": 5000,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mantle-rpc.publicnode.com",
@@ -1761,6 +1843,7 @@
       "chainId": 13396,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://13396.rpc.thirdweb.com/",
@@ -1775,6 +1858,7 @@
       "chainId": 4326,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://megaeth.drpc.org",
@@ -1797,6 +1881,7 @@
       "chainId": 4200,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.merlinchain.io",
@@ -1819,6 +1904,7 @@
       "chainId": 82,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.meter.io",
@@ -1837,6 +1923,7 @@
       "chainId": 1088,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://metis-andromeda.gateway.tenderly.co",
@@ -1863,6 +1950,7 @@
       "chainId": 2288,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://moca.drpc.org",
@@ -1881,6 +1969,7 @@
       "chainId": 34443,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mode-mainnet.rpc.sentio.xyz",
@@ -1907,13 +1996,10 @@
       "chainId": 143,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://monad.rpc.blxrbdn.com",
-          "provider": "official"
-        },
-        {
-          "url": "https://rpc2.monad.xyz",
           "provider": "official"
         },
         {
@@ -1933,6 +2019,7 @@
       "chainId": 1284,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://moonbeam-rpc.publicnode.com",
@@ -1959,6 +2046,7 @@
       "chainId": 1285,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.api.moonriver.moonbeam.network",
@@ -1985,6 +2073,7 @@
       "chainId": 2818,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://morph.drpc.org",
@@ -2007,6 +2096,7 @@
       "chainId": 21000000,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://21000000.rpc.thirdweb.com/",
@@ -2021,6 +2111,7 @@
       "chainId": 47763,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://47763.rpc.thirdweb.com/",
@@ -2043,6 +2134,7 @@
       "chainId": 7208,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.nexera.network",
@@ -2057,6 +2149,7 @@
       "chainId": 6900,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://6900.rpc.thirdweb.com/",
@@ -2075,6 +2168,7 @@
       "chainId": 42170,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://arb-nova-mainnet.gateway.tatum.io",
@@ -2101,6 +2195,7 @@
       "chainId": 16661,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://0g-rpc.publicnode.com",
@@ -2127,6 +2222,7 @@
       "chainId": 66,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://oktc.drpc.org",
@@ -2149,6 +2245,7 @@
       "chainId": 204,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://opbnb-rpc.publicnode.com",
@@ -2175,6 +2272,7 @@
       "chainId": 1612,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.openledger.xyz",
@@ -2193,6 +2291,7 @@
       "chainId": 10,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://gateway.tenderly.co/public/optimism",
@@ -2219,6 +2318,7 @@
       "chainId": 291,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://orderly.drpc.org",
@@ -2241,6 +2341,7 @@
       "chainId": 3338,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://peaq-rpc.publicnode.com",
@@ -2267,6 +2368,7 @@
       "chainId": 1672,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://pharos.drpc.org",
@@ -2289,6 +2391,7 @@
       "chainId": 9745,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://plasma-mainnet.gateway.tatum.io",
@@ -2315,6 +2418,7 @@
       "chainId": 98865,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [],
       "note": "Chain 98865 'Plume' is a deprecated legacy Plume network (superseded by plume-mainnet/98866, chainKey 'plumephoenix' in this dataset) that the team has been shutting down; no live keyless public RPC could be found/verified. 0 endpoints."
     },
@@ -2324,6 +2428,7 @@
       "chainId": 98866,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://plume-mainnet.gateway.tatum.io",
@@ -2346,6 +2451,7 @@
       "chainId": 137,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://gateway.tenderly.co/public/polygon",
@@ -2370,13 +2476,10 @@
       "chainKey": "rarible",
       "eid": 30235,
       "chainId": 1380012617,
-      "eligible": true,
+      "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
-        {
-          "url": "https://mainnet.rpc.rarichain.org/http",
-          "provider": "official"
-        },
         {
           "url": "https://1380012617.rpc.thirdweb.com/",
           "provider": "thirdweb"
@@ -2390,6 +2493,7 @@
       "chainId": 72957,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet-rpc.rayls.com",
@@ -2404,6 +2508,7 @@
       "chainId": 111188,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://111188.rpc.thirdweb.com/",
@@ -2418,6 +2523,7 @@
       "chainId": 151,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://governors.mainnet.redbelly.network",
@@ -2436,6 +2542,7 @@
       "chainId": 1729,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.reya.network",
@@ -2454,6 +2561,7 @@
       "chainId": 4153,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.risechain.com",
@@ -2468,6 +2576,7 @@
       "chainId": 4663,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.mainnet.chain.robinhood.com",
@@ -2482,6 +2591,7 @@
       "chainId": 30,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rootstock.drpc.org",
@@ -2504,6 +2614,7 @@
       "chainId": 5464,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://sagaevm.jsonrpc.sagarpc.io",
@@ -2522,6 +2633,7 @@
       "chainId": 1996,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://1996.rpc.thirdweb.com",
@@ -2536,6 +2648,7 @@
       "chainId": 534352,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://scroll-rpc.publicnode.com",
@@ -2562,6 +2675,7 @@
       "chainId": 1329,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://sei.drpc.org",
@@ -2588,6 +2702,7 @@
       "chainId": 148,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://json-rpc.evm.shimmer.network",
@@ -2606,6 +2721,7 @@
       "chainId": 2355,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://2355.rpc.thirdweb.com",
@@ -2628,6 +2744,7 @@
       "chainId": 2046399126,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://2046399126.rpc.thirdweb.com",
@@ -2646,6 +2763,7 @@
       "chainId": 5031,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://api.infra.mainnet.somnia.network",
@@ -2668,6 +2786,7 @@
       "chainId": 1868,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.soneium.org",
@@ -2690,6 +2809,7 @@
       "chainId": 146,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://sonic-rpc.publicnode.com",
@@ -2712,6 +2832,7 @@
       "chainId": 50104,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.sophon.xyz",
@@ -2734,6 +2855,7 @@
       "chainId": 8227,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://subnets.avax.network/space/mainnet/rpc",
@@ -2752,6 +2874,7 @@
       "chainId": 988,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.stable.xyz",
@@ -2774,6 +2897,7 @@
       "chainId": 1514,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet.storyrpc.io",
@@ -2800,6 +2924,7 @@
       "chainId": 964,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://bittensor-lite-public.nodies.app",
@@ -2818,6 +2943,7 @@
       "chainId": 55244,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.superposition.so",
@@ -2836,6 +2962,7 @@
       "chainId": 1923,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/swell",
@@ -2858,6 +2985,7 @@
       "chainId": 239,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/tac",
@@ -2884,6 +3012,7 @@
       "chainId": 167000,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://taiko-mainnet.gateway.tenderly.co",
@@ -2910,6 +3039,7 @@
       "chainId": 40,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://telos.drpc.org",
@@ -2932,6 +3062,7 @@
       "chainId": 4217,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://tempo-mainnet.drpc.org",
@@ -2954,6 +3085,7 @@
       "chainId": 1559,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/tenet_evm",
@@ -2976,6 +3108,7 @@
       "chainId": 710420,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://710420.rpc.thirdweb.com",
@@ -2990,6 +3123,7 @@
       "chainId": 88,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://viction.drpc.org",
@@ -3012,6 +3146,7 @@
       "chainId": 130,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://unichain-rpc.publicnode.com",
@@ -3038,6 +3173,7 @@
       "chainId": 480,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://worldchain.drpc.org",
@@ -3064,6 +3200,7 @@
       "chainId": 660279,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://rpc.ankr.com/xai",
@@ -3086,6 +3223,7 @@
       "chainId": 94524,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://94524.rpc.thirdweb.com",
@@ -3100,6 +3238,7 @@
       "chainId": 50,
       "eligible": true,
       "etherscanFree": true,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.xdcrpc.com",
@@ -3122,6 +3261,7 @@
       "chainId": 196,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://xlayer.drpc.org",
@@ -3148,6 +3288,7 @@
       "chainId": 37,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://xpla-evm-rpc.publicnode.com",
@@ -3170,6 +3311,7 @@
       "chainId": 261131,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.mainnet.zama.org",
@@ -3184,6 +3326,7 @@
       "chainId": 48900,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://zircuit.rpc.sentio.xyz",
@@ -3206,6 +3349,7 @@
       "chainId": 3776,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://3776.rpc.thirdweb.com",
@@ -3220,6 +3364,7 @@
       "chainId": 1101,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://zkevm-rpc.com",
@@ -3232,10 +3377,6 @@
         {
           "url": "https://1rpc.io/polygon/zkevm",
           "provider": "1rpc"
-        },
-        {
-          "url": "https://polygon-zkevm.rpc.sentio.xyz",
-          "provider": "sentio"
         }
       ],
       "note": ""
@@ -3246,6 +3387,7 @@
       "chainId": 810180,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://rpc.zklink.io",
@@ -3264,6 +3406,7 @@
       "chainId": 324,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://mainnet.era.zksync.io",
@@ -3290,6 +3433,7 @@
       "chainId": 1408,
       "eligible": false,
       "etherscanFree": false,
+      "multicall3": false,
       "rpcs": [
         {
           "url": "https://vflow-rpc.zkverify.io",
@@ -3304,6 +3448,7 @@
       "chainId": 7777777,
       "eligible": true,
       "etherscanFree": false,
+      "multicall3": true,
       "rpcs": [
         {
           "url": "https://zora.drpc.org",

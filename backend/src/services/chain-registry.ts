@@ -135,7 +135,12 @@ function load(): { byChainId: Map<number, ChainRef>; byKey: Map<string, ChainRef
     // real distinct provider, so it legitimately restores quorum.
     const withKeyed = applyKeyedProviderOverrides(entry);
     const eligible = entry.eligible && meetsQuorum(withKeyed.rpcs ?? []);
-    const ref = applyMantleRpcOverride({ ...withKeyed, eligible });
+    // Capability flag, not an eligibility input: a chain without Multicall3 is
+    // still fully monitorable, it just reads unbatched. The registry is a build
+    // artifact, so coerce strictly — absent/stale/non-boolean must degrade to
+    // false (individual calls), never to true (batching against no contract).
+    const multicall3 = (entry as { multicall3?: unknown }).multicall3 === true;
+    const ref = applyMantleRpcOverride({ ...withKeyed, eligible, multicall3 });
     byChainId.set(ref.chainId, ref);
     byKey.set(ref.chainKey, ref);
   }
