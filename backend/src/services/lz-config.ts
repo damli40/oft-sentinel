@@ -863,16 +863,26 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     if (calls.length === 0) return [];
 
     if (chain.multicall3) {
+      let lastErr: unknown;
       for (const client of [srcClient, ...fallbackClients]) {
         try {
           return await aggregate3Batch(
             (to, data) => rawCall(client, to, data),
             calls,
           );
-        } catch {
+        } catch (e) {
           // Transport-level failure for this client — try the next one.
+          lastErr = e;
         }
       }
+      // The per-call path below answers correctly but spends the CU volume
+      // batching exists to save. A chain that lands here persistently (stale
+      // multicall3 flag, provider rejecting aggregate3) is invisible in the
+      // results — this line is the only signal, and the first thing to check
+      // when post-deploy CU numbers disagree with the projection.
+      console.warn(
+        `[lz-config] multicall batch failed on ${chain.chainKey} (${calls.length} calls), falling back to per-call: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+      );
     }
 
     // No Multicall3, or every client failed the batch. Per-call path, which
@@ -898,14 +908,19 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   async function batchOnClient(
     client: RpcClient,
     hasMulticall: boolean,
+    chainKey: string,
     calls: Call[],
   ): Promise<(string | null)[]> {
     if (calls.length === 0) return [];
     if (hasMulticall) {
       try {
         return await aggregate3Batch((to, data) => rawCall(client, to, data), calls);
-      } catch {
-        // Transport-level failure for the whole batch — fall through to per-call.
+      } catch (e) {
+        // Transport-level failure for the whole batch — fall through to
+        // per-call. Same observability rationale as resilientBatch's warn.
+        console.warn(
+          `[lz-config] multicall batch failed on dst ${chainKey} (${calls.length} calls), falling back to per-call: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     }
     return mapLimit(calls, FALLBACK_CONCURRENCY, (c) =>
@@ -1224,7 +1239,7 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       d1.push({ target: j.endpoint, callData: SEL.getReceiveLibrary + padAddr(j.peer) + padU32(chain.eid) });
       d1.push({ target: j.peer, callData: SEL.peers + padU32(chain.eid) });
     }
-    const d1res = await batchOnClient(dstClient, hasMc, d1);
+    const d1res = await batchOnClient(dstClient, hasMc, ref.chainKey, d1);
 
     const needConfig: { job: DstJob; recvLib: string }[] = [];
     jobs.forEach((j, i) => {
@@ -1268,7 +1283,7 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       target: job.endpoint,
       callData: SEL.getConfig + padAddr(job.peer) + padAddr(recvLib) + padU32(chain.eid) + padU32(2),
     }));
-    const d2res = await batchOnClient(dstClient, hasMc, d2);
+    const d2res = await batchOnClient(dstClient, hasMc, ref.chainKey, d2);
     needConfig.forEach(({ job }, i) => {
       const raw = d2res[i];
       if (raw) { try { job.route.receiveUln = decodeUlnConfig(raw); } catch { /* null */ } }
