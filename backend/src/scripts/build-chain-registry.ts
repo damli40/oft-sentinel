@@ -32,7 +32,7 @@
  */
 import { readFileSync, writeFileSync } from "fs";
 import { resolve, dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { normalizeProvider, meetsQuorum } from "../services/chain-registry.js";
 import { MULTICALL3_ADDRESS, mapLimit } from "../services/multicall.js";
 import type { ChainRef, ChainRpc } from "../types.js";
@@ -45,6 +45,10 @@ const VERIFY_TIMEOUT_MS = 8_000;
 // concurrency 24. 10 in-flight + transient-retry keeps them from rate-limiting.
 const VERIFY_CONCURRENCY = 10;
 const VERIFY_RETRIES = 3; // transient failures only (never a chainId mismatch)
+// The capability probe retries ONCE per endpoint, not VERIFY_RETRIES times —
+// see probeMulticall3 for why that asymmetry is deliberate.
+const PROBE_RETRIES = 1;
+const PROBE_RETRY_DELAY_MS = 250;
 
 const DEPLOYMENTS_URL = "https://metadata.layerzero-api.com/v1/metadata/deployments";
 const CHAINLIST_URL = "https://api.etherscan.io/v2/chainlist";
@@ -196,14 +200,36 @@ async function probeMulticall3Once(rpcUrl: string): Promise<boolean | null> {
  *  drpc endpoint returns "Temporary internal error" while sei-apis.com returns
  *  the bytecode, which silently costs the chain its batching and makes the flag
  *  flap between runs. Exhausting every endpoint without a definitive answer
- *  yields false — an unprobed chain reads unbatched, which is always safe. */
+ *  yields false — an unprobed chain reads unbatched, which is always safe.
+ *
+ *  RETRY BUDGET (deliberate asymmetry with verifyRpc, which retries 3x): each
+ *  endpoint gets ONE retry before we fall through to the next. Multi-endpoint
+ *  chains already have the fall-through as their redundancy, so more retries
+ *  would mostly buy latency; the one retry exists for the chain with a SINGLE
+ *  verified endpoint, which otherwise sits one 429 away from a spurious false.
+ *  Under-retrying here is the safe direction — it can only cost a chain its
+ *  batching (an unbatched read is still a correct read), never mark a chain
+ *  batchable that is not. So the budget is capped rather than exhaustive. */
 async function probeMulticall3(rpcUrls: string[]): Promise<boolean> {
   for (const url of rpcUrls) {
-    const answer = await probeMulticall3Once(url);
-    if (answer !== null) return answer;
+    for (let attempt = 0; attempt <= PROBE_RETRIES; attempt++) {
+      const answer = await probeMulticall3Once(url);
+      if (answer !== null) return answer;
+      if (attempt < PROBE_RETRIES) {
+        await new Promise((res) =>
+          setTimeout(res, PROBE_RETRY_DELAY_MS * (attempt + 1) + Math.floor(Math.random() * 150)),
+        );
+      }
+    }
   }
   return false;
 }
+
+/** Test-only exports (`_` prefix, same convention as _resetChainRegistryCache).
+ *  Exported so the null-vs-false fail-safe property can be unit-tested with a
+ *  stubbed fetch — it is the whole safety guarantee of the flag and the earlier
+ *  version of this probe got it wrong. Not part of the script's public surface. */
+export { probeMulticall3Once as _probeMulticall3Once, probeMulticall3 as _probeMulticall3 };
 
 async function main(): Promise<void> {
   const sweep = JSON.parse(readFileSync(sweepPath(), "utf8")) as Sweep;
@@ -301,7 +327,14 @@ async function main(): Promise<void> {
   console.log("─".repeat(60));
 }
 
-main().catch((e) => {
-  console.error("[build-registry] FAILED:", e);
-  process.exit(1);
-});
+// Run only when invoked as the entry point. Importing this module (the probe
+// unit tests do) must not kick off a 400-endpoint live sweep.
+const invokedDirectly =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch((e) => {
+    console.error("[build-registry] FAILED:", e);
+    process.exit(1);
+  });
+}

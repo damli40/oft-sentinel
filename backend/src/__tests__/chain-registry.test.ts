@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, mkdtempSync, rmSync } from "fs";
-import { join } from "path";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { tmpdir } from "os";
+import { _probeMulticall3, _probeMulticall3Once } from "../scripts/build-chain-registry.js";
 import {
   getChainRef,
   getChainRefByKey,
@@ -258,8 +260,241 @@ describe("multicall3 flag", () => {
   });
 
   it("does not let the flag affect eligibility", () => {
-    writeRegistry({ mantle: { ...twoProviderChain, multicall3: false } });
-    expect(getChainRef(5000)!.eligible).toBe(true);
+    // Eligibility is the quorum rule and nothing else. Pin BOTH directions:
+    // the flag can neither cost a quorum-passing chain its eligibility, nor
+    // buy eligibility for a chain that fails quorum.
+    const eligibilityOf = (entry: Record<string, unknown>): boolean => {
+      writeRegistry({ mantle: entry });
+      return getChainRef(5000)!.eligible;
+    };
+    // Same 2-distinct-provider entry, flag true / false / absent → invariant.
+    expect(eligibilityOf({ ...twoProviderChain, multicall3: true })).toBe(true);
+    expect(eligibilityOf({ ...twoProviderChain, multicall3: false })).toBe(true);
+    expect(eligibilityOf({ ...twoProviderChain })).toBe(true); // key absent
+
+    // A single-provider chain fails quorum; multicall3: true must not rescue it.
+    writeRegistry({ solo: { ...oneProviderChain, multicall3: true } });
+    expect(getChainRef(99999)!.multicall3).toBe(true); // flag really is set
+    expect(getChainRef(99999)!.eligible).toBe(false);
+    expect(listEligibleChains().map((c) => c.chainKey)).not.toContain("solo");
+  });
+});
+
+describe("committed chain-registry.json artifact", () => {
+  // Later tasks batch reads on these three. A regeneration that came back
+  // all-false, or a hand-edit, would otherwise ship green.
+  it("carries multicall3: true for ethereum, base and mantle", () => {
+    const artifact = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "chain-registry.json");
+    // Read the file directly — getChainRef honours CHAIN_REGISTRY_PATH, which
+    // these tests repoint at fixtures. Shape is { chains: { <chainKey>: … } }.
+    const parsed = JSON.parse(readFileSync(artifact, "utf8")) as {
+      chains?: Record<string, { multicall3?: unknown }>;
+    };
+    expect(parsed.chains, "artifact has no chains map").toBeTruthy();
+    for (const key of ["ethereum", "base", "mantle"]) {
+      expect(parsed.chains![key], `${key} missing from the committed registry`).toBeTruthy();
+      expect(parsed.chains![key].multicall3, `${key}.multicall3`).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Generator probe: the null-vs-false distinction IS the fail-safe guarantee.
+// A wrong `true` makes Task 3 batch reads on a chain with no Multicall3 and
+// fail every read there, so the only input that may ever produce `true` is a
+// well-formed positive answer. Everything else must read as "no answer" (null,
+// fall through) or "definitively absent" (false).
+// ---------------------------------------------------------------------------
+describe("multicall3 probe (build-chain-registry)", () => {
+  // Real Multicall3 runtime bytecode prefix, as an endpoint would return it.
+  const BYTECODE = "0x6080604052600436106100f35760003560e01c80634d2301cc11610095";
+
+  type Stub =
+    | { kind: "throw" }
+    | { kind: "http"; status: number }
+    | { kind: "badJson" }
+    | { kind: "body"; body: unknown };
+
+  const ok = (body: unknown) => ({ kind: "body", body } as Stub);
+  const rpcError = ok({
+    jsonrpc: "2.0",
+    id: 1,
+    error: { code: -32000, message: "Temporary internal error. Please retry" },
+  });
+
+  function respond(s: Stub): Promise<unknown> {
+    switch (s.kind) {
+      case "throw":
+        return Promise.reject(new Error("socket hang up / aborted"));
+      case "http":
+        return Promise.resolve({ ok: false, status: s.status, json: async () => ({}) });
+      case "badJson":
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError("Unexpected token < in JSON at position 0");
+          },
+        });
+      case "body":
+        return Promise.resolve({ ok: true, status: 200, json: async () => s.body });
+    }
+  }
+
+  /** Stub global fetch from a url → response plan. An array is consumed one
+   *  entry per call (last entry repeats), which lets a test model "429 then
+   *  answers". Returns the recorded call order — one entry PER ATTEMPT. */
+  function stubFetch(plan: Record<string, Stub | Stub[]>): string[] {
+    const calls: string[] = [];
+    const seen: Record<string, number> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        calls.push(url);
+        const entry = plan[url];
+        if (entry === undefined) return Promise.reject(new Error(`unplanned fetch to ${url}`));
+        if (!Array.isArray(entry)) return respond(entry);
+        const i = Math.min(seen[url] ?? 0, entry.length - 1);
+        seen[url] = (seen[url] ?? 0) + 1;
+        return respond(entry[i]);
+      }),
+    );
+    return calls;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  describe("probeMulticall3Once", () => {
+    it("returns null on a JSON-RPC error response", async () => {
+      stubFetch({ "https://a": rpcError });
+      expect(await _probeMulticall3Once("https://a")).toBeNull();
+    });
+
+    it("returns null when the request throws or times out", async () => {
+      stubFetch({ "https://a": { kind: "throw" } });
+      expect(await _probeMulticall3Once("https://a")).toBeNull();
+    });
+
+    it("returns null on an HTTP non-ok", async () => {
+      stubFetch({ "https://a": { kind: "http", status: 429 }, "https://b": { kind: "http", status: 503 } });
+      expect(await _probeMulticall3Once("https://a")).toBeNull();
+      expect(await _probeMulticall3Once("https://b")).toBeNull();
+    });
+
+    it("returns null when the body is not JSON", async () => {
+      stubFetch({ "https://a": { kind: "badJson" } });
+      expect(await _probeMulticall3Once("https://a")).toBeNull();
+    });
+
+    it("returns null when result is not a string", async () => {
+      stubFetch({
+        "https://num": ok({ result: 1234 }),
+        "https://null": ok({ result: null }),
+        "https://obj": ok({ result: { code: "0xdead" } }),
+        "https://arr": ok({ result: ["0xdead"] }),
+        "https://absent": ok({ jsonrpc: "2.0", id: 1 }),
+      });
+      for (const u of ["https://num", "https://null", "https://obj", "https://arr", "https://absent"]) {
+        expect(await _probeMulticall3Once(u), u).toBeNull();
+      }
+    });
+
+    it("returns null when result is a string that does not start with 0x", async () => {
+      stubFetch({
+        "https://raw": ok({ result: "6080604052600436106100f3" }),
+        "https://empty": ok({ result: "" }),
+        "https://text": ok({ result: "not available" }),
+      });
+      for (const u of ["https://raw", "https://empty", "https://text"]) {
+        expect(await _probeMulticall3Once(u), u).toBeNull();
+      }
+    });
+
+    it('returns false for "0x" — a definitive "no contract there"', async () => {
+      stubFetch({ "https://a": ok({ result: "0x" }) });
+      expect(await _probeMulticall3Once("https://a")).toBe(false);
+    });
+
+    it("returns true only for real bytecode", async () => {
+      stubFetch({ "https://a": ok({ result: BYTECODE }) });
+      expect(await _probeMulticall3Once("https://a")).toBe(true);
+    });
+  });
+
+  describe("probeMulticall3 (across endpoints)", () => {
+    it("falls through to the next endpoint on a JSON-RPC error", async () => {
+      // The sei case: drpc errors, sei-apis.com answers. Must not read as false.
+      const calls = stubFetch({ "https://bad": rpcError, "https://good": ok({ result: BYTECODE }) });
+      expect(await _probeMulticall3(["https://bad", "https://good"])).toBe(true);
+      expect(calls).toEqual(["https://bad", "https://bad", "https://good"]); // 1 retry, then next
+    });
+
+    it("falls through when an endpoint throws / times out", async () => {
+      const calls = stubFetch({ "https://dead": { kind: "throw" }, "https://good": ok({ result: BYTECODE }) });
+      expect(await _probeMulticall3(["https://dead", "https://good"])).toBe(true);
+      expect(calls).toContain("https://good");
+    });
+
+    it("falls through on an HTTP non-ok", async () => {
+      const calls = stubFetch({ "https://429": { kind: "http", status: 429 }, "https://good": ok({ result: BYTECODE }) });
+      expect(await _probeMulticall3(["https://429", "https://good"])).toBe(true);
+      expect(calls).toContain("https://good");
+    });
+
+    it("stops at the first DEFINITIVE answer, without consulting later endpoints", async () => {
+      // "0x" is an answer, not a failure — no fall-through, no retry.
+      const calls = stubFetch({ "https://a": ok({ result: "0x" }), "https://b": ok({ result: BYTECODE }) });
+      expect(await _probeMulticall3(["https://a", "https://b"])).toBe(false);
+      expect(calls).toEqual(["https://a"]);
+    });
+
+    it("retries a single endpoint once before giving up (429 then answer)", async () => {
+      // The single-verified-endpoint chain: one 429 must not cost it the flag.
+      const calls = stubFetch({ "https://solo": [{ kind: "http", status: 429 }, ok({ result: BYTECODE })] });
+      expect(await _probeMulticall3(["https://solo"])).toBe(true);
+      expect(calls).toEqual(["https://solo", "https://solo"]);
+    });
+
+    it("returns false — never true — when every endpoint fails", async () => {
+      const calls = stubFetch({
+        "https://a": rpcError,
+        "https://b": { kind: "throw" },
+        "https://c": { kind: "http", status: 500 },
+      });
+      expect(await _probeMulticall3(["https://a", "https://b", "https://c"])).toBe(false);
+      expect(calls.length).toBe(6); // every endpoint tried twice, none skipped
+    });
+
+    it("returns false for a chain with zero verified endpoints, without any fetch", async () => {
+      const calls = stubFetch({});
+      expect(await _probeMulticall3([])).toBe(false);
+      expect(calls).toEqual([]);
+    });
+
+    it("NO input path yields true except a well-formed positive answer", async () => {
+      // The one assertion this whole block exists for.
+      const nonPositive: Stub[] = [
+        rpcError,
+        { kind: "throw" },
+        { kind: "http", status: 429 },
+        { kind: "http", status: 500 },
+        { kind: "badJson" },
+        ok({ result: 1 }),
+        ok({ result: null }),
+        ok({ jsonrpc: "2.0", id: 1 }),
+        ok({ result: "6080" }),
+        ok({ result: "0x" }),
+      ];
+      for (const [i, s] of nonPositive.entries()) {
+        vi.unstubAllGlobals();
+        stubFetch({ "https://x": s });
+        expect(await _probeMulticall3(["https://x"]), `shape #${i}`).toBe(false);
+      }
+      // …and the positive control, so the loop above cannot pass vacuously.
+      vi.unstubAllGlobals();
+      stubFetch({ "https://x": ok({ result: BYTECODE }) });
+      expect(await _probeMulticall3(["https://x"])).toBe(true);
+    }, 30_000);
   });
 });
 
