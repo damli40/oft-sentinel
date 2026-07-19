@@ -7,7 +7,9 @@ import {
   AGG3_SEL, multicallHandler, MANY_EIDS, manyEidMap, peerForEid, perEidPeers,
   fullHandler, failHandler, makeFactory, chainRef, deps, eidMapDep,
   installHermeticChainRegistry, revertWith, word, buildUln, type Handler,
+  setChainRegistryChains, errorStringRevert,
 } from "./helpers/fake-rpc.js";
+import type { ChainRef, RouteSnapshot } from "../types.js";
 
 installHermeticChainRegistry();
 
@@ -480,5 +482,346 @@ describe("corridor discovery — batch ordering and chunking", () => {
     const agg = log.filter((l) => l.includes(AGG3_SEL)).length;
     expect(agg).toBeGreaterThanOrEqual(3); // 120 calls / chunk 50
     expect(log.filter((l) => l.includes(SEL.peers)).length).toBe(0);
+  });
+});
+
+// ── Destination-side reads ───────────────────────────────────────────────────
+// The third and last fan-out site. Per route it was three sequential eth_calls
+// (getReceiveLibrary, getConfig, and the reverse-peer peers() check) against a
+// client rebuilt from scratch for every route.
+//
+// Its index spaces are the most hazardous in the file. Routes are grouped by
+// DESTINATION chain, and within a group there are two FILTERED lists:
+//   `jobs`       — routes with a peer AND a destination the registry can resolve
+//   `needConfig` — of those, the ones whose receive library actually decoded
+// Neither lines up with routeList, and both are indexed positionally. A shift
+// costs a route the config of one of its NEIGHBOURS on a different chain.
+
+/** Address from a small integer — the same encoding peerForEid uses, so an
+ *  address seen on the wire identifies the eid it belongs to. */
+const addrFor = (n: number) => getAddress(("0x" + n.toString(16).padStart(40, "0")) as `0x${string}`);
+const eidOfAddr = (hex: string) => parseInt(hex.replace(/^0x/, ""), 16);
+
+/** Per-eid distinct destination values. Distinctness is the whole point: the
+ *  shared fixture answers the same bytes for every route, so a misassigned
+ *  result there is indistinguishable from the right one. */
+const recvLibFor = (eid: number) => addrFor(eid + 0x1000000);
+const reversePeerFor = (eid: number) => addrFor(eid * 2);
+
+const DST_A = "dst-a";
+const DST_B = "dst-b";
+
+/** Registry entries for the two destination chains. chainIds are outside the
+ *  keyed-provider table (1 / 8453 / 5000) so ALCHEMY_API_KEY or DRPC_API_KEY in
+ *  the ambient env cannot prepend an RPC and change rpcs[0]. */
+function dstChains(mcA: boolean, mcB: boolean): Record<string, ChainRef> {
+  const mk = (key: string, chainId: number, multicall3: boolean): ChainRef => ({
+    chainKey: key, eid: chainId, chainId, eligible: true,
+    etherscanFree: false, multicall3, rpcs: [{ url: key, provider: "p" }],
+  });
+  return { [DST_A]: mk(DST_A, 900_001, mcA), [DST_B]: mk(DST_B, 900_002, mcB) };
+}
+
+/** eid → destination chain. A third of the corridors land on a chainKey the
+ *  registry does NOT know, so they are dropped from `jobs` and the job index
+ *  space genuinely diverges from routeList's. */
+const dstKeyFor = (eid: number) =>
+  eid % 3 === 0 ? DST_A : eid % 3 === 1 ? DST_B : `nowhere-${eid}`;
+const hasDst = (eid: number) => eid % 3 !== 2;
+/** …and within a known destination, a fifth fail the receive-library read, so
+ *  `needConfig` is in turn shorter than `jobs`. */
+const noRecvLib = (eid: number) => eid % 5 === 0;
+
+const splitEidMap = async () =>
+  Object.fromEntries(
+    MANY_EIDS.map((e) => [e, { chainKey: dstKeyFor(e), endpoint: ENDPOINT }]),
+  );
+
+/**
+ * Destination-chain handler. Every answer is derived from the PEER address in
+ * the calldata (or, for peers(), from the contract being called), which is
+ * unique per eid — so a result landing on the wrong route is visible.
+ */
+const dstHandler: Handler = (to, data) => {
+  const sel = data.slice(0, 10);
+  if (sel === SEL.getReceiveLibrary) {
+    const eid = eidOfAddr(data.slice(34, 74));
+    return noRecvLib(eid) ? "0x" : "0x" + word(recvLibFor(eid)) + word("0");
+  }
+  if (sel === SEL.getConfig) {
+    const eid = eidOfAddr(data.slice(34, 74));
+    // A route whose receive LIBRARY was unreadable must never reach wave 2 at
+    // all. This destination answers those routes with a perfectly valid ULN for
+    // ANY library, so a defaulted or fabricated library — a `null` quietly
+    // promoted into a positive claim about the receive config — surfaces as a
+    // receiveUln that was never actually read.
+    if (noRecvLib(eid)) return buildUln(eid % 7);
+    // Otherwise the library argument must be the one wave 1 resolved for THIS
+    // peer. A wave-2 call list that pairs a route with a neighbour's library
+    // answers nothing, so a mis-BUILT batch shows up as a null ULN — separately
+    // from the requiredDVNCount tag, which catches a mis-ASSIGNED result.
+    if (eidOfAddr(data.slice(98, 138)) !== eid + 0x1000000) return "0x";
+    return buildUln(eid % 7);
+  }
+  // peers() is called ON the destination peer contract, so `to` names the eid.
+  if (sel === SEL.peers) return "0x" + word(reversePeerFor(eidOfAddr(to)));
+  return "0x";
+};
+
+const srcHandler = perEidPeers(fullHandler().handler);
+
+const byEid = (routes: RouteSnapshot[]) =>
+  new Map(routes.map((r) => [r.eid, r] as const));
+
+describe("destination-side reads — Multicall3 batching", () => {
+  it("batches destination-side reads through aggregate3, not one call per route", async () => {
+    setChainRegistryChains(dstChains(true, false));
+    const log: string[] = [];
+    const factory = makeFactory(
+      {
+        u1: { handler: multicallHandler(srcHandler) },
+        [DST_A]: { handler: multicallHandler(dstHandler) },
+        [DST_B]: { handler: dstHandler },
+      },
+      log,
+    );
+
+    await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({ makeClient: factory, loadEidMap: splitEidMap }),
+    );
+
+    const dstAgg = log.filter((l) => l.startsWith(`${DST_A}|`) && l.includes(AGG3_SEL)).length;
+    const dstIndividual = log.filter((l) => l.startsWith(`${DST_A}|`) && !l.includes(AGG3_SEL)).length;
+    expect(dstAgg).toBeGreaterThan(0);
+    expect(dstIndividual).toBe(0);
+
+    // dst-b has no Multicall3, so it must NOT be handed an aggregate3 payload —
+    // batching against a contract that isn't deployed reads back as "no data"
+    // for every route at once.
+    expect(log.filter((l) => l.startsWith(`${DST_B}|`) && l.includes(AGG3_SEL))).toEqual([]);
+    expect(log.filter((l) => l.startsWith(`${DST_B}|`)).length).toBeGreaterThan(0);
+  });
+
+  it("builds ONE client per destination chain, not one per route", async () => {
+    setChainRegistryChains(dstChains(true, false));
+    const built: string[] = [];
+    const base = makeFactory(
+      {
+        u1: { handler: multicallHandler(srcHandler) },
+        [DST_A]: { handler: multicallHandler(dstHandler) },
+        [DST_B]: { handler: dstHandler },
+      },
+      [],
+    );
+    const factory = (url: string) => { built.push(url); return base(url); };
+
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({ makeClient: factory, loadEidMap: splitEidMap }),
+    );
+
+    // Non-vacuity: many routes really do share each destination chain.
+    expect(snap.routes.filter((r) => dstKeyFor(r.eid) === DST_A).length).toBeGreaterThan(10);
+    expect(built.filter((u) => u === DST_A)).toEqual([DST_A]);
+    expect(built.filter((u) => u === DST_B)).toEqual([DST_B]);
+  });
+
+  it.each([true, false])(
+    "ORDERING: every eid keeps its OWN destination reads across BOTH filtered index spaces (dst multicall3=%s)",
+    async (dstMc) => {
+      setChainRegistryChains(dstChains(dstMc, dstMc));
+      const snap = await readSnapshot(
+        OFT,
+        chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+        deps({
+          makeClient: makeFactory(
+            {
+              u1: { handler: multicallHandler(srcHandler) },
+              [DST_A]: { handler: dstMc ? multicallHandler(dstHandler) : dstHandler },
+              [DST_B]: { handler: dstMc ? multicallHandler(dstHandler) : dstHandler },
+            },
+            [],
+          ),
+          loadEidMap: splitEidMap,
+        }),
+      );
+
+      expect(snap.routes.length).toBe(MANY_EIDS.length);
+      for (const r of snap.routes) {
+        if (!hasDst(r.eid)) {
+          // Never in ANY job list. It can only hold a value handed to it by
+          // mistake — and "we did not look" must never read as a finding.
+          expect(r.receiveUln).toBeNull();
+          expect(r.reversePeer ?? null).toBeNull();
+          expect(r.peerSymmetric ?? null).toBeNull();
+          continue;
+        }
+        // Wave 1 covers every job, including the ones wave 2 drops.
+        expect(r.reversePeer).toBe(reversePeerFor(r.eid));
+        expect(r.peerSymmetric).toBe(false);
+        if (noRecvLib(r.eid)) {
+          // Filtered OUT of wave 2 — this is where the two spaces diverge.
+          expect(r.receiveUln).toBeNull();
+        } else {
+          expect(r.receiveUln).not.toBeNull();
+          expect(r.receiveUln!.requiredDVNCount).toBe(r.eid % 7);
+        }
+      }
+
+      // Non-vacuity: both filters really bite, and there is a long tail after
+      // the first removal in each space for a shift to land on.
+      expect(snap.routes.filter((r) => !hasDst(r.eid)).length).toBeGreaterThan(1);
+      expect(snap.routes.filter((r) => hasDst(r.eid) && noRecvLib(r.eid)).length).toBeGreaterThan(1);
+      expect(snap.routes.filter((r) => hasDst(r.eid) && !noRecvLib(r.eid)).length).toBeGreaterThan(50);
+    },
+  );
+
+  it("EQUIVALENCE: identical destination-side results with and without multicall", async () => {
+    // Same fixture data on both paths, so any difference is the batching.
+    const run = async (mc: boolean) => {
+      _resetCorridorCache();
+      setChainRegistryChains(dstChains(mc, mc));
+      return readSnapshot(
+        OFT,
+        chainRef([{ url: "u1", provider: "p1" }], { multicall3: mc }),
+        deps({
+          makeClient: makeFactory(
+            {
+              u1: { handler: mc ? multicallHandler(srcHandler) : srcHandler },
+              [DST_A]: { handler: mc ? multicallHandler(dstHandler) : dstHandler },
+              [DST_B]: { handler: mc ? multicallHandler(dstHandler) : dstHandler },
+            },
+            [],
+          ),
+          loadEidMap: splitEidMap,
+        }),
+      );
+    };
+
+    const plain = await run(false);
+    const batched = await run(true);
+
+    // Compared per eid rather than positionally: routes are appended in
+    // completion order, which is not part of the contract.
+    const p = byEid(plain.routes);
+    const b = byEid(batched.routes);
+    expect([...b.keys()].sort()).toEqual([...p.keys()].sort());
+    expect(p.size).toBeGreaterThan(0); // guard against vacuous equality
+    for (const [eid, pr] of p) expect(b.get(eid)).toEqual(pr);
+
+    // The failure fixture is doing its job — otherwise "the two paths agree"
+    // would only mean neither had to decide what an unread destination means.
+    expect(plain.routes.filter((r) => r.receiveUln === null).length).toBeGreaterThan(0);
+    expect(plain.routes.filter((r) => r.receiveUln !== null).length).toBeGreaterThan(0);
+  });
+
+  // A revert is the chain's verdict; a throw is our own failure to ask. Both
+  // must land on null here — the receive side is the enforcement boundary, and
+  // a wrong "we read it and it's fine" suppresses a real CRITICAL.
+  const deadDstSpecs: [string, () => { handler: Handler }][] = [
+    [
+      "every destination read reverts",
+      () => ({ handler: multicallHandler(() => errorStringRevert("nope")) }),
+    ],
+    [
+      // aggregate3 itself fails, so the batch degrades to per-call — which also
+      // throws. Transport failure end to end.
+      "the destination RPC is unreachable",
+      () => ({ handler: (() => { throw new Error("fetch failed"); }) as Handler }),
+    ],
+  ];
+
+  it.each(deadDstSpecs)(
+    "leaves receiveUln null and peerSymmetric null when %s",
+    async (_name, mkSpec) => {
+      setChainRegistryChains(dstChains(true, true));
+      const dstSpec = mkSpec();
+
+      const snap = await readSnapshot(
+        OFT,
+        chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+        deps({
+          makeClient: makeFactory(
+            { u1: { handler: multicallHandler(srcHandler) }, [DST_A]: dstSpec, [DST_B]: dstSpec },
+            [],
+          ),
+          loadEidMap: splitEidMap,
+        }),
+      );
+
+      expect(snap.routes.length).toBe(MANY_EIDS.length);
+      for (const r of snap.routes) {
+        expect(r.receiveUln).toBeNull();
+        expect(r.reversePeer ?? null).toBeNull();
+        // NOT false. `false` is the assertion "the destination does not peer
+        // back", which is itself a CRITICAL-class finding; we did not look.
+        expect(r.peerSymmetric ?? null).toBeNull();
+      }
+    },
+  );
+
+  it("keeps peerSymmetric null when only the reverse-peer read fails", async () => {
+    // The partial-batch case: the receive side answers, the peers() sub-call
+    // does not. A shared try/catch or a defaulted boolean would turn the second
+    // failure into `false` and mint a half-wired-corridor finding out of it.
+    setChainRegistryChains(dstChains(true, true));
+    const partial: Handler = (to, data) =>
+      data.slice(0, 10) === SEL.peers ? errorStringRevert("no peers()") : dstHandler(to, data);
+
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          {
+            u1: { handler: multicallHandler(srcHandler) },
+            [DST_A]: { handler: multicallHandler(partial) },
+            [DST_B]: { handler: multicallHandler(partial) },
+          },
+          [],
+        ),
+        loadEidMap: splitEidMap,
+      }),
+    );
+
+    const readable = snap.routes.filter((r) => hasDst(r.eid) && !noRecvLib(r.eid));
+    expect(readable.length).toBeGreaterThan(10);
+    for (const r of readable) {
+      expect(r.receiveUln!.requiredDVNCount).toBe(r.eid % 7); // receive side still read
+      expect(r.peerSymmetric ?? null).toBeNull();
+      expect(r.reversePeer ?? null).toBeNull();
+    }
+  });
+
+  it("reports peerSymmetric true when the destination peers back to this OFT", async () => {
+    setChainRegistryChains(dstChains(true, true));
+    const symmetric: Handler = (to, data) =>
+      data.slice(0, 10) === SEL.peers ? "0x" + word(OFT) : dstHandler(to, data);
+
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          {
+            u1: { handler: multicallHandler(srcHandler) },
+            [DST_A]: { handler: multicallHandler(symmetric) },
+            [DST_B]: { handler: multicallHandler(symmetric) },
+          },
+          [],
+        ),
+        loadEidMap: splitEidMap,
+      }),
+    );
+
+    const wired = snap.routes.filter((r) => hasDst(r.eid));
+    expect(wired.length).toBeGreaterThan(10);
+    for (const r of wired) {
+      expect(r.peerSymmetric).toBe(true);
+      expect(r.reversePeer).toBe(getAddress(OFT));
+    }
   });
 });

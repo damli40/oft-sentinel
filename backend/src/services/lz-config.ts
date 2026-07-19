@@ -874,6 +874,51 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     );
   }
 
+  /**
+   * Batch against an ARBITRARY client — the destination-side sibling of
+   * resilientBatch, which closes over the SOURCE chain's client list and so
+   * cannot be pointed at another chain.
+   *
+   * Destination reads use a bare rawCall today with no retry and no fallback
+   * chain, so on any failure this degrades to exactly that: one rawCall per
+   * call, null where the call did not answer. Both helpers share
+   * aggregate3Batch for the encode → chunk → call → decode loop; they differ
+   * only in what they do when a batch fails (walk the client list vs. degrade
+   * on the single client we have).
+   */
+  async function batchOnClient(
+    client: RpcClient,
+    hasMulticall: boolean,
+    calls: Call[],
+  ): Promise<(string | null)[]> {
+    if (calls.length === 0) return [];
+    if (hasMulticall) {
+      try {
+        return await aggregate3Batch((to, data) => rawCall(client, to, data), calls);
+      } catch {
+        // Transport-level failure for the whole batch — fall through to per-call.
+      }
+    }
+    return mapLimit(calls, FALLBACK_CONCURRENCY, (c) =>
+      rawCall(client, c.target, c.callData).catch(() => null),
+    );
+  }
+
+  /**
+   * One client per destination RPC URL. makeClient(dstRpc) used to run once PER
+   * ROUTE, so ten corridors into the same destination chain built ten clients
+   * (and ten connection pools) for one endpoint.
+   */
+  const dstClients = new Map<string, RpcClient>();
+  function dstClientFor(url: string): RpcClient {
+    let c = dstClients.get(url);
+    if (!c) {
+      c = makeClient(url);
+      dstClients.set(url, c);
+    }
+    return c;
+  }
+
   const [dvnMeta, eidMap] = await Promise.all([dvnMetaLoader(), eidMapLoader()]);
 
   // The source chain's chainKey — used for DVN name resolution of send-side
@@ -1065,46 +1110,20 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
         } catch { /* secondary unavailable — skip check */ }
       }
 
-      // ── Step 3: destination-side receive ULN (for mismatch detection) ────
-      // Destination RPC comes from the registry now (every eligible chain), not
-      // the old 22-entry curated map. Unknown / ineligible destination → skip the
-      // mismatch check (behaviour preserved: no RPC known ⇒ receiveUln stays null).
+      // The destination chain's RPC and its own endpoint address (varies by
+      // chain). Unknown / ineligible destination → nothing destination-side can
+      // be read at all, and every destination field stays null.
+      //
+      // The receive ULN and the reverse-peer check used to live here too; they
+      // are batched per destination chain after this loop. Delivery accounting
+      // stays per route because its destination read is gated on the SOURCE
+      // chain's outboundNonce, which this loop has just read.
       const peerAddr = peerAddresses[eid];
       const dstRpc = chainInfo?.chainKey ? getChainRefByKey(chainInfo.chainKey)?.rpcs[0]?.url : undefined;
-      // Use the destination chain's own endpoint address (varies by chain).
       const dstEndpoint = (chainInfo?.endpoint ?? ENDPOINT) as Address;
       if (peerAddr && dstRpc) {
         const peerAddrChecked = getAddress(peerAddr) as Address;
-        const dstClient = makeClient(dstRpc);
-
-        try {
-          // Reverse direction: read the peer's receive config for messages coming
-          // FROM this source chain — so the source EID here is chain.eid.
-          const [recvLib] = decodeAddressBool(
-            await rawCall(dstClient, dstEndpoint, SEL.getReceiveLibrary + padAddr(peerAddrChecked) + padU32(chain.eid))
-          );
-          if (recvLib) {
-            route.receiveUln = decodeUlnConfig(
-              await rawCall(dstClient, dstEndpoint, SEL.getConfig + padAddr(peerAddrChecked) + padAddr(recvLib) + padU32(chain.eid) + padU32(2))
-            );
-          }
-        } catch { /* receiveUln stays null */ }
-
-        // ── Reverse peer: is this corridor wired in BOTH directions? ─────────
-        // setPeer is one-directional. If the source peers to the destination but the
-        // destination does not peer back, quoteSend still succeeds (it only reads the
-        // source's own peer mapping), tokens still leave — and lzReceive reverts on
-        // _getPeerOrRevert forever. LZ documents this as the "NotInitializable" /
-        // Blocked class. Teams wire chains one direction at a time, so this is
-        // predicted to be common, and it is invisible to every other check we run.
-        try {
-          const back = await rawCall(dstClient, peerAddrChecked, SEL.peers + padU32(chain.eid));
-          if (back && back !== "0x") {
-            const backAddr = BigInt(back) === 0n ? null : getAddress("0x" + back.slice(-40));
-            route.reversePeer = backAddr;
-            route.peerSymmetric = backAddr !== null && backAddr.toLowerCase() === oftAddr.toLowerCase();
-          }
-        } catch { /* peerSymmetric stays null — unread, never assume unset */ }
+        const dstClient = dstClientFor(dstRpc);
 
         // ── Delivery accounting: what actually crossed ───────────────────────
         // sent (source outboundNonce) vs delivered (destination inboundNonce). No rule
@@ -1147,6 +1166,105 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       routes.push(route);
     })
   );
+
+  // ── Step 3c: destination-side reads, grouped by destination chain ─────────
+  // Three reads per route (receive library, receive ULN, reverse peer) against a
+  // client that was rebuilt for every single route. Now: one client and two
+  // batched waves per DESTINATION chain, covering all of that chain's routes.
+  //
+  // ⚠️ Two FILTERED index spaces are created here, and neither lines up with
+  // routeList:
+  //   `jobs`       — routes with a peer AND a destination the registry resolves
+  //   `needConfig` — of those, the ones whose receive library actually decoded
+  // Results are assigned back over the list they were BUILT from, never over
+  // routeList. Indexing wave 1 over routeList, or wave 2 over jobs, silently
+  // hands a corridor the receive config of a route on a different chain — and
+  // the receive config is what decides whether a message can be delivered.
+  type DstJob = { route: RouteSnapshot; peer: Address; endpoint: Address };
+  const byDstChain = new Map<string, { ref: ChainRef; jobs: DstJob[] }>();
+
+  for (const route of routeList) {
+    const peerAddr = peerAddresses[route.eid];
+    if (!peerAddr || !route.chainKey) continue;
+    const ref = getChainRefByKey(route.chainKey);
+    // No RPC known for this destination ⇒ every destination field stays null,
+    // and the engine falls back to `inferred` rather than asserting anything.
+    if (!ref?.rpcs[0]?.url) continue;
+    const bucket = byDstChain.get(route.chainKey) ?? { ref, jobs: [] };
+    bucket.jobs.push({
+      route,
+      peer: getAddress(peerAddr) as Address,
+      // The destination's OWN endpoint address, kept PER JOB rather than per
+      // bucket: two eids sharing a chainKey must not inherit each other's
+      // endpoint. Multicall3 carries a target per sub-call, so a batch with
+      // mixed targets is fine.
+      endpoint: (eidMap[route.eid]?.endpoint ?? ENDPOINT) as Address,
+    });
+    byDstChain.set(route.chainKey, bucket);
+  }
+
+  await Promise.all([...byDstChain.values()].map(async ({ ref, jobs }) => {
+    const dstClient = dstClientFor(ref.rpcs[0].url);
+    const hasMc = ref.multicall3;
+
+    // Wave 1: receive library + reverse peer. Neither depends on a prior result.
+    const d1: Call[] = [];
+    for (const j of jobs) {
+      // Reverse direction: the peer's receive config for messages coming FROM
+      // this source chain, so the EID argument is chain.eid.
+      d1.push({ target: j.endpoint, callData: SEL.getReceiveLibrary + padAddr(j.peer) + padU32(chain.eid) });
+      d1.push({ target: j.peer, callData: SEL.peers + padU32(chain.eid) });
+    }
+    const d1res = await batchOnClient(dstClient, hasMc, d1);
+
+    const needConfig: { job: DstJob; recvLib: string }[] = [];
+    jobs.forEach((j, i) => {
+      const rawRecv = d1res[i * 2];
+      const back = d1res[i * 2 + 1];
+
+      // A null is the old `catch { /* receiveUln stays null */ }` branch: we did
+      // not get an answer. Each decode keeps its own guard, because one
+      // unreadable field must not cost the other.
+      if (rawRecv) {
+        try {
+          const [recvLib] = decodeAddressBool(rawRecv);
+          if (recvLib) needConfig.push({ job: j, recvLib });
+        } catch { /* receiveUln stays null */ }
+      }
+
+      // ── Reverse peer: is this corridor wired in BOTH directions? ───────────
+      // setPeer is one-directional. If the source peers to the destination but
+      // the destination does not peer back, quoteSend still succeeds (it only
+      // reads the source's own peer mapping), tokens still leave — and
+      // lzReceive reverts on _getPeerOrRevert forever. LZ documents this as the
+      // "NotInitializable" / Blocked class. Teams wire chains one direction at a
+      // time, so this is predicted to be common, and it is invisible to every
+      // other check we run.
+      //
+      // Unread stays NULL, never false. `false` is the positive claim "the
+      // destination does not peer back", which is itself a finding; null means
+      // we did not look.
+      if (back && back !== "0x") {
+        try {
+          const backAddr = BigInt(back) === 0n ? null : getAddress("0x" + back.slice(-40));
+          j.route.reversePeer = backAddr;
+          j.route.peerSymmetric = backAddr !== null && backAddr.toLowerCase() === oftAddr.toLowerCase();
+        } catch { /* peerSymmetric stays null — unread, never assume unset */ }
+      }
+    });
+
+    // Wave 2: the receive ULN, which needs wave 1's library address. Indexed
+    // over needConfig — the list these calls were built from.
+    const d2: Call[] = needConfig.map(({ job, recvLib }) => ({
+      target: job.endpoint,
+      callData: SEL.getConfig + padAddr(job.peer) + padAddr(recvLib) + padU32(chain.eid) + padU32(2),
+    }));
+    const d2res = await batchOnClient(dstClient, hasMc, d2);
+    needConfig.forEach(({ job }, i) => {
+      const raw = d2res[i];
+      if (raw) { try { job.route.receiveUln = decodeUlnConfig(raw); } catch { /* null */ } }
+    });
+  }));
 
   // ── Step 4: owner + EIP-1967 proxy admin ─────────────────────────────────
   let owner: string | null = null;

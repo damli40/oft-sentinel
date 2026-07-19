@@ -295,24 +295,44 @@ export function deps(extra: Partial<ReadSnapshotDeps>): ReadSnapshotDeps {
  * live RPC URL, and the test hangs until the 5s timeout instead of failing
  * honestly. Re-asserting per test makes the hermetic setup order-independent.
  */
+let hermeticRegFile: string | null = null;
+
+/**
+ * Rewrite the hermetic registry's chain table and drop the module cache.
+ *
+ * Destination-side reads resolve their RPC (and Multicall3 capability) through
+ * `getChainRefByKey`, so a test that wants a destination read to HAPPEN has to
+ * put that chain in the registry. Requires installHermeticChainRegistry().
+ */
+export function setChainRegistryChains(chains: Record<string, ChainRef>): void {
+  if (!hermeticRegFile) throw new Error("installHermeticChainRegistry() must run first");
+  writeFileSync(
+    hermeticRegFile,
+    JSON.stringify({ generatedAt: "x", source: "test", chains }),
+  );
+  _resetChainRegistryCache();
+}
+
 export function installHermeticChainRegistry(): void {
   let regDir: string;
-  let regFile: string;
   const savedRegPath = process.env.CHAIN_REGISTRY_PATH;
 
   beforeAll(() => {
     regDir = mkdtempSync(join(tmpdir(), "lzreg-"));
-    regFile = join(regDir, "reg.json");
-    writeFileSync(regFile, JSON.stringify({ generatedAt: "x", source: "test", chains: {} }));
-    process.env.CHAIN_REGISTRY_PATH = regFile;
+    hermeticRegFile = join(regDir, "reg.json");
+    setChainRegistryChains({});
+    process.env.CHAIN_REGISTRY_PATH = hermeticRegFile;
     _resetChainRegistryCache();
   });
 
   beforeEach(() => {
-    if (process.env.CHAIN_REGISTRY_PATH !== regFile) {
-      process.env.CHAIN_REGISTRY_PATH = regFile;
-      _resetChainRegistryCache();
+    // Reset to the empty registry every test, not just when the env var drifted:
+    // a test that installs destination chains must not leak them into the next
+    // one, where an unexpected destination read would change the snapshot.
+    if (process.env.CHAIN_REGISTRY_PATH !== hermeticRegFile) {
+      process.env.CHAIN_REGISTRY_PATH = hermeticRegFile!;
     }
+    setChainRegistryChains({});
   });
   afterAll(() => {
     rmSync(regDir, { recursive: true, force: true });
