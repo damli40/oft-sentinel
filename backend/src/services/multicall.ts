@@ -7,9 +7,32 @@ import { encodeFunctionData, decodeAbiParameters, type Address } from "viem";
 export const MULTICALL3_ADDRESS =
   "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
 
+/**
+ * Parse an env-supplied positive integer, or throw.
+ *
+ * These values gate batching and concurrency. A typo that silently becomes NaN
+ * or 0 does not fail — it produces empty or truncated result sets, which read
+ * downstream as "nothing to report" and suppress findings. Failing at import
+ * is the safe direction: a process that will not start cannot mis-report.
+ */
+function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(
+      `${name} must be a positive integer, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return n;
+}
+
 /** Default sub-calls per batch. Bounds both the node's eth_call gas exposure
  *  and the per-request payload size. */
-export const MULTICALL_CHUNK_SIZE = Number(process.env.MULTICALL_CHUNK_SIZE ?? 50);
+export const MULTICALL_CHUNK_SIZE = parsePositiveInt(
+  "MULTICALL_CHUNK_SIZE",
+  process.env.MULTICALL_CHUNK_SIZE,
+  50,
+);
 
 export type Call = { target: Address; callData: string };
 export type CallResult = { success: boolean; returnData: string };
@@ -43,15 +66,12 @@ const AGGREGATE3_ABI = [
   },
 ] as const;
 
-const RESULT_PARAMS = [
-  {
-    type: "tuple[]",
-    components: [
-      { name: "success", type: "bool" },
-      { name: "returnData", type: "bytes" },
-    ],
-  },
-] as const;
+/**
+ * Derived from the ABI above rather than re-declared. Two hand-written copies of
+ * one wire format can drift; a decoder that disagrees with the encoder about
+ * field order misattributes every result it returns.
+ */
+const RESULT_PARAMS = AGGREGATE3_ABI[0].outputs;
 
 /**
  * allowFailure is ALWAYS true. This codebase treats a revert as meaningful signal
@@ -107,7 +127,18 @@ export async function aggregate3Batch(
   for (const part of chunk(calls, chunkSize)) {
     const raw = await call(MULTICALL3_ADDRESS, encodeAggregate3(part));
     if (!raw || raw === "0x") throw new Error("empty multicall result");
-    for (const r of decodeAggregate3(raw)) {
+    const rows = decodeAggregate3(raw);
+    // Result index i must correspond to input call i. A short response would
+    // truncate and a long one would over-fill, shifting every finding onto the
+    // wrong call. We cannot tell which rows are the wrong ones, so we refuse the
+    // whole batch: that routes to the caller's transport-failure path ("we failed
+    // to ask"), which is the safe direction.
+    if (rows.length !== part.length) {
+      throw new Error(
+        `multicall returned ${rows.length} results for ${part.length} calls`,
+      );
+    }
+    for (const r of rows) {
       out.push(r.success && r.returnData && r.returnData !== "0x" ? r.returnData : null);
     }
   }
@@ -122,6 +153,13 @@ export async function mapLimit<T, R>(
   limit: number,
   fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+  // A limit of 0, a negative, or NaN spawns zero workers; Promise.all([]) then
+  // resolves immediately and we hand back a pre-allocated array of `undefined`
+  // with the right length and no RPC ever made. That is the exact silent-wrong-
+  // answer shape this module exists to prevent, so it throws instead.
+  if (!Number.isFinite(limit) || limit < 1) {
+    throw new Error(`mapLimit concurrency must be >= 1, got ${limit}`);
+  }
   const out = new Array<R>(items.length);
   let next = 0;
   await Promise.all(
@@ -136,4 +174,8 @@ export async function mapLimit<T, R>(
 }
 
 /** Concurrency for fallback (non-batched) reads. */
-export const FALLBACK_CONCURRENCY = Number(process.env.FALLBACK_CONCURRENCY ?? 4);
+export const FALLBACK_CONCURRENCY = parsePositiveInt(
+  "FALLBACK_CONCURRENCY",
+  process.env.FALLBACK_CONCURRENCY,
+  4,
+);
