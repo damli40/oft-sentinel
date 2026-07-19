@@ -507,6 +507,52 @@ describe("env configuration", () => {
     },
   );
 
+  /**
+   * The upper bound. "0" and "-1" are obviously wrong; 5000 is not — it parses,
+   * it is a positive integer, and it reads like a throughput tweak. What it
+   * actually does is push the batch past the node's eth_call gas cap, where the
+   * sub-calls that ran out come back `success: false` with empty returnData:
+   * a transport failure indistinguishable from a revert, which is the one shape
+   * the safety invariant forbids. Unreachable at the default of 50 — the bound
+   * exists so it stays unreachable by a typo too.
+   */
+  it("accepts the boundary value exactly", async () => {
+    vi.stubEnv("MULTICALL_CHUNK_SIZE", "500");
+    vi.resetModules();
+    const m = await load();
+    expect(m.MULTICALL_CHUNK_SIZE).toBe(500);
+    expect(m.MULTICALL_CHUNK_SIZE).toBe(m.MULTICALL_CHUNK_MAX);
+  });
+
+  it.each(["501", "5000", "1000000"])(
+    "fails loudly at import on an over-cap MULTICALL_CHUNK_SIZE=\"%s\"",
+    async (tooBig) => {
+      vi.stubEnv("MULTICALL_CHUNK_SIZE", tooBig);
+      vi.resetModules();
+      await expect(load()).rejects.toThrow(/MULTICALL_CHUNK_SIZE must be <= 500/);
+    },
+  );
+
+  it("REJECTS rather than clamps — a silently-substituted value is a config nobody chose", async () => {
+    // The tempting alternative is `Math.min(n, MAX)`, which keeps the monitor
+    // booting. It also means an operator who wrote 5000 gets 500 and is never
+    // told, so the batch size in production stops being the one in the config.
+    // Throwing is the same call this module already makes for "0".
+    vi.stubEnv("MULTICALL_CHUNK_SIZE", "5000");
+    vi.resetModules();
+    await expect(load()).rejects.toThrow();
+  });
+
+  /** The bound is on the chunk size specifically. Concurrency is a different
+   *  resource (sockets, not gas in one eth_call) and keeps only its lower bound
+   *  — so a test that "passes" by capping every env var would fail here. */
+  it("does not impose the chunk cap on FALLBACK_CONCURRENCY", async () => {
+    vi.stubEnv("FALLBACK_CONCURRENCY", "501");
+    vi.resetModules();
+    const m = await load();
+    expect(m.FALLBACK_CONCURRENCY).toBe(501);
+  });
+
   it.each(["four", "0", "-2", "1.5"])(
     "fails loudly at import on FALLBACK_CONCURRENCY=\"%s\"",
     async (bad) => {

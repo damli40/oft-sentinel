@@ -26,8 +26,19 @@ export const MULTICALL3_ADDRESS =
  * A genuinely malformed value ("abc", "0", "-1", "2.5") still throws. Those say
  * someone meant something specific and got it wrong, and guessing past a typo is
  * how a 5000-call chunk size or a concurrency of 0 reaches production unnoticed.
+ *
+ * `max` extends that to values that parse fine and are still wrong — see
+ * MULTICALL_CHUNK_SIZE. It REJECTS rather than clamps, for the same reason "0"
+ * throws: silently substituting a working number for the one an operator wrote
+ * is guessing past their intent, and a monitor running on a config nobody chose
+ * is the failure this whole function exists to make loud.
  */
-function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
+function parsePositiveInt(
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+  max?: number,
+): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) {
@@ -35,8 +46,34 @@ function parsePositiveInt(name: string, raw: string | undefined, fallback: numbe
       `${name} must be a positive integer, got ${JSON.stringify(raw)}`,
     );
   }
+  if (max !== undefined && n > max) {
+    throw new Error(
+      `${name} must be <= ${max}, got ${JSON.stringify(raw)}`,
+    );
+  }
   return n;
 }
+
+/**
+ * Hard ceiling on sub-calls per aggregate3.
+ *
+ * The bound is a SAFETY bound, not a performance one. Every sub-call in a batch
+ * spends gas inside one `eth_call`, and nodes cap that call's gas. Past the cap
+ * the node does not reject the request — aggregate3 keeps `allowFailure: true`,
+ * so the sub-calls that ran out come back `success: false` with empty
+ * returnData, which is indistinguishable from a revert. That is a TRANSPORT
+ * failure wearing the one costume the safety invariant forbids: the caller reads
+ * it as "the chain said no" and maps it to a null it believes it asked for, when
+ * in fact the question was never answered. The larger the chunk, the more of a
+ * batch can vanish that way at once.
+ *
+ * 500 leaves an order of magnitude of headroom over the default of 50 for anyone
+ * tuning throughput, while staying far below the size at which a typical 50M
+ * eth_call gas cap starts truncating a batch of config reads (~50k gas each).
+ * Unreachable at the default; the point is that it is not reachable by a typo
+ * either.
+ */
+export const MULTICALL_CHUNK_MAX = 500;
 
 /** Default sub-calls per batch. Bounds both the node's eth_call gas exposure
  *  and the per-request payload size. */
@@ -44,6 +81,7 @@ export const MULTICALL_CHUNK_SIZE = parsePositiveInt(
   "MULTICALL_CHUNK_SIZE",
   process.env.MULTICALL_CHUNK_SIZE,
   50,
+  MULTICALL_CHUNK_MAX,
 );
 
 export type Call = { target: Address; callData: string };

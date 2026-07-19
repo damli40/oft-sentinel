@@ -116,22 +116,133 @@ export const ZERO_ULN = {
 
 export type Handler = (to: Address, data: string) => string;
 
-/** A handler that answers every selector with valid data (given a getConfig uln). */
-export function fullHandler(uln = ulnZero, ownerCode = "0xabcd"): { handler: Handler; ownerCode: string } {
-  const handler: Handler = (_to, data) => {
+/**
+ * What a send-side call must ask before this fixture will answer it. Overridable
+ * for a test that drives readSnapshot with a different OFT, endpoint or source
+ * chain; the defaults match `OFT` / `ENDPOINT` / `chainRef()`.
+ */
+export interface SendSideExpect {
+  /** The OFT the OApp-level selectors are aimed at and the endpoint-level ones ask about. */
+  oft?: string;
+  /** The endpoint the endpoint-level selectors are aimed at. */
+  endpoint?: string;
+  /** The SOURCE chain's own eid. No corridor carries it — see isRouteEid. */
+  srcEid?: number;
+  /** The library getSendLibrary hands back, and therefore the only one a wave-2
+   *  getConfig may name. */
+  sendLib?: string;
+}
+
+/**
+ * A handler that answers every send-side selector with valid data (given a
+ * getConfig uln).
+ *
+ * ⚠️ STRICT, in the same sense as read-snapshot.test.ts's `dstHandler`, and for
+ * the same reason. Index-alignment coverage pins WHICH route a result lands on;
+ * it says nothing about WHAT QUESTION the calldata asked. A fixture that
+ * dispatches on the selector alone — `case SEL.getConfig: return uln;` — answers
+ * anything, so every calldata mutation that keeps the selector intact survives
+ * it, and three of those mutations produce a WRONG POSITIVE rather than a
+ * fail-safe null:
+ *
+ *  - getConfig with config type 1 (EXECUTOR) instead of 2 (ULN). decodeUlnConfig
+ *    does not reject an executor config — its 192-char floor is cleared — so it
+ *    returns a NON-NULL UlnSnapshot of garbage, and the monitor asserts a DVN set
+ *    it never read.
+ *  - getConfig with the oapp and library arguments swapped. The endpoint would
+ *    answer that with the DEFAULT config for the library-as-oapp, i.e. a
+ *    plausible-looking config on every route regardless of what the OFT set.
+ *  - enforcedOptions with msgType 2 instead of 1 (lzReceive). Every route reads
+ *    back "no enforced options" — a silent false negative on the exact finding
+ *    the call exists to raise.
+ *
+ * And a peers() sweep aimed at the ENDPOINT instead of the OFT discovers zero
+ * corridors fleet-wide, which reads downstream as "all clear".
+ *
+ * So: every modelled selector returns `"0x"` unless the TARGET, the eid
+ * argument, the config type, the msgType and the library argument are all
+ * exactly what the production read path should be sending.
+ */
+export function fullHandler(
+  uln = ulnZero,
+  ownerCode = "0xabcd",
+  expect: SendSideExpect = {},
+): { handler: Handler; ownerCode: string } {
+  const oft = (expect.oft ?? OFT).toLowerCase();
+  const endpoint = (expect.endpoint ?? ENDPOINT).toLowerCase();
+  const srcEid = expect.srcEid ?? MANTLE_EID;
+  const sendLib = (expect.sendLib ?? SENDLIB).toLowerCase();
+
+  const handler: Handler = (to, data) => {
+    const at = (addr: string) => to.toLowerCase() === addr;
+    /** The 20-byte address argument whose word starts at `start` (post-padding). */
+    const argAddr = (start: number) => "0x" + data.slice(start, start + 40).toLowerCase();
+    const argU = (start: number) => parseInt(data.slice(start, start + 64), 16);
+    /**
+     * A corridor eid — anything except the source chain's OWN eid, which no
+     * send-side read may ever carry. `chain.eid` is the single most available
+     * wrong value at every one of these call sites (it is in scope, it is a
+     * uint32, and it makes a plausible-looking call), and substituting it turns
+     * a per-route read into one that asks the chain about itself.
+     */
+    const isRouteEid = (eid: number) => Number.isInteger(eid) && eid > 0 && eid !== srcEid;
+
     switch (data.slice(0, 10)) {
-      case SEL.peers: return peersRet(PEER);
-      case SEL.getSendLibrary: return addrWord(SENDLIB);
+      // peers(uint32 _eid) — on the OFT itself.
+      case SEL.peers:
+        if (!at(oft)) return "0x";
+        if (!isRouteEid(argU(10))) return "0x";
+        return peersRet(PEER);
+
+      // getSendLibrary(address _sender, uint32 _dstEid) — on the ENDPOINT.
+      case SEL.getSendLibrary:
+        if (!at(endpoint)) return "0x";
+        if (argAddr(34) !== oft) return "0x";
+        if (!isRouteEid(argU(74))) return "0x";
+        return addrWord(SENDLIB);
+
+      // isDefaultSendLibrary(address _sender, uint32 _dstEid) — on the ENDPOINT.
+      //
       // 0x-prefixed, like every real RPC return. Without the prefix the plain
       // path still read it as `false` (BigInt of a zero-word), while the batched
       // path handed the unprefixed string to viem's bytes encoder and got a
       // NON-zero payload back — so the same fixture produced `false` unbatched
       // and `true` batched. A harness that answers in a shape no chain emits
       // cannot testify about equivalence.
-      case SEL.isDefaultSendLibrary: return "0x" + boolWord(false);
-      case SEL.getReceiveLibrary: return addrBoolRet(RECVLIB, false);
-      case SEL.getConfig: return uln;
-      case SEL.enforcedOptions: return enforcedEmpty;
+      case SEL.isDefaultSendLibrary:
+        if (!at(endpoint)) return "0x";
+        if (argAddr(34) !== oft) return "0x";
+        if (!isRouteEid(argU(74))) return "0x";
+        return "0x" + boolWord(false);
+
+      // getReceiveLibrary(address _receiver, uint32 _srcEid) — on the ENDPOINT.
+      case SEL.getReceiveLibrary:
+        if (!at(endpoint)) return "0x";
+        if (argAddr(34) !== oft) return "0x";
+        if (!isRouteEid(argU(74))) return "0x";
+        return addrBoolRet(RECVLIB, false);
+
+      // getConfig(address _oapp, address _lib, uint32 _eid, uint32 _configType)
+      // — on the ENDPOINT. Config type 2 is the ULN config; 1 is the EXECUTOR
+      // config, which decodeUlnConfig happily returns non-null garbage for.
+      case SEL.getConfig:
+        if (!at(endpoint)) return "0x";
+        if (argAddr(34) !== oft) return "0x";
+        if (argAddr(98) !== sendLib) return "0x";
+        if (!isRouteEid(argU(138))) return "0x";
+        if (argU(202) !== 2) return "0x";
+        return uln;
+
+      // enforcedOptions(uint32 _eid, uint16 _msgType) — on the OFT. msgType 1 is
+      // lzReceive; asking any other one reads back "none set" on every route.
+      case SEL.enforcedOptions:
+        if (!at(oft)) return "0x";
+        if (!isRouteEid(argU(10))) return "0x";
+        if (argU(74) !== 1) return "0x";
+        return enforcedEmpty;
+
+      // Nullary, and called on more than one target (the OFT, and a ProxyAdmin's
+      // owner) — nothing to pin beyond the selector.
       case SEL.owner: return addrWord(OWNER);
       case SEL.getThreshold: return "0x";
       default: return "0x";
@@ -340,15 +451,22 @@ export const peerForEid = (eid: number) =>
  * "no peer here" reply, and the majority answer on a real full-EID sweep.
  * `malformedFor` makes them answer an undecodable word, which is what a
  * misbehaving RPC hands back; it must cost that corridor and nothing else.
+ *
+ * STRICT about the target, like fullHandler: peers() lives on the OApp, and a
+ * sweep aimed at the ENDPOINT instead answers nothing on every eid at once —
+ * zero corridors discovered, no findings, "all clear". A fixture keyed on the
+ * eid argument alone cannot see that, because the eid argument is unchanged.
  */
 export function perEidPeers(
   inner: Handler,
-  opts: { zeroFor?: Iterable<number>; malformedFor?: Iterable<number> } = {},
+  opts: { zeroFor?: Iterable<number>; malformedFor?: Iterable<number>; oft?: string } = {},
 ): Handler {
   const zero = new Set(opts.zeroFor ?? []);
   const bad = new Set(opts.malformedFor ?? []);
+  const oft = (opts.oft ?? OFT).toLowerCase();
   return (to, data) => {
     if (data.slice(0, 10) !== SEL.peers) return inner(to, data);
+    if (to.toLowerCase() !== oft) return "0x";
     const eid = parseInt(data.slice(10), 16);
     if (bad.has(eid)) return MALFORMED_PEER;
     if (zero.has(eid)) return ZERO_PEER;

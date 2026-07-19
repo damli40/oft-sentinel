@@ -134,14 +134,15 @@ describe("readSnapshot — registry-driven clients", () => {
   });
 });
 
-// These two tests do ~1.3-1.9s of real work each (measured identical before and
-// after the batching change), which leaves little headroom under vitest's 5s
-// default once a sibling test file runs in parallel. That combination produced a
-// reproducible timeout, so both get an explicit generous budget. The budget is
-// headroom, not an expectation: if either starts genuinely approaching it, that
-// is a real regression and not a reason to raise the number again.
-const CACHE_TEST_TIMEOUT = 30_000;
-
+// These two tests used to need a 30s budget. Not because they did 30s of work,
+// but because `etherscanFree: true` sent them down the Etherscan fallback for
+// every selector the fixture does not model, and on a machine with
+// ETHERSCAN_API_KEY set that meant four or five LIVE fetches to api.etherscan.io,
+// each behind a real 400ms spacer — ~1.9s per test, which flaked against
+// vitest's 5s default under parallel load. src/__tests__/setup.ts unsets the key
+// for the whole suite, so the fallback now rejects in-process and both tests run
+// in single-digit milliseconds on the default budget. The fallback path itself is
+// pinned directly, below.
 describe("readSnapshot — corridor cache", () => {
   it("skips discovery on a cache hit within TTL", async () => {
     const discover = vi.fn(async () => new Map<number, string>([[ETH_EID, peersRet(PEER)]]));
@@ -160,7 +161,7 @@ describe("readSnapshot — corridor cache", () => {
     expect(second.routes).toHaveLength(1);
     // Cache hit → discovery not re-run.
     expect(discover).toHaveBeenCalledTimes(1);
-  }, CACHE_TEST_TIMEOUT);
+  });
 
   it("re-discovers after the corridor TTL expires", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -184,7 +185,110 @@ describe("readSnapshot — corridor cache", () => {
     } finally {
       vi.useRealTimers();
     }
-  }, CACHE_TEST_TIMEOUT);
+  });
+});
+
+/**
+ * The Etherscan eth_call proxy — resilientCall's last resort, after the primary
+ * RPC has been retried and every fallback has failed, on chains flagged
+ * `etherscanFree`.
+ *
+ * This path used to be covered only by ACCIDENT: the corridor-cache tests above
+ * fell into it for the selectors their fixture does not model, and reached the
+ * real api.etherscan.io to do it. That is not coverage — nothing asserted
+ * anything about it, and the suite's result depended on a third party and on
+ * whether ETHERSCAN_API_KEY happened to be set. Here the key and `fetch` are
+ * both stubbed, so the path runs end to end, in process, and is actually
+ * checked: the request shape, and the fact that a read every RPC dropped still
+ * comes back.
+ */
+describe("Etherscan eth_call fallback", () => {
+  /** Drain a promise that schedules 400ms spacers as it goes. Each Etherscan
+   *  call queues its own timer only once the previous one has resolved, so a
+   *  single advance cannot flush the chain — it has to be pumped until the read
+   *  settles. */
+  async function settle<T>(p: Promise<T>): Promise<T> {
+    let done = false;
+    p.then(() => { done = true; }, () => { done = true; });
+    for (let i = 0; i < 500 && !done; i++) await vi.advanceTimersByTimeAsync(500);
+    return p;
+  }
+
+  it("serves reads that every RPC dropped, and asks Etherscan the right question", async () => {
+    // The SAME strict fixture the RPC path uses, so Etherscan cannot answer a
+    // question the endpoint would have refused either.
+    const { handler } = fullHandler();
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const u = new URL(String(input));
+      urls.push(u.origin + u.pathname);
+      const to = u.searchParams.get("to")!;
+      const data = u.searchParams.get("data")!;
+      return { ok: true, json: async () => ({ result: handler(to as `0x${string}`, data) }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("ETHERSCAN_API_KEY", "stub-key-for-tests");
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      const snap = await settle(readSnapshot(
+        OFT,
+        // One RPC, and it fails EVERY read → nothing but Etherscan can answer.
+        chainRef([{ url: "p0", provider: "official" }], { etherscanFree: true }),
+        deps({
+          makeClient: makeFactory({ p0: { handler: failHandler } }, []),
+          // No PeerSet logs → the exhaustive peers() sweep, which is itself read
+          // through the fallback chain.
+          discoverPeers: async () => null,
+        }),
+      ));
+
+      // Corridor discovery, wave 1 and wave 2 all came back — through Etherscan.
+      expect(snap.routes).toHaveLength(1);
+      expect(snap.routes[0].peerAddress).toBe(getAddress(PEER));
+      expect(snap.routes[0].sendLibrary).toBe(getAddress(SENDLIB));
+      expect(snap.routes[0].uln).toEqual(ZERO_ULN);
+
+      // Every request was a v2 proxy eth_call, and it carried a key. The key's
+      // VALUE is deliberately not asserted — a test that prints or compares one
+      // is a test that can leak one.
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+      for (const [input] of fetchMock.mock.calls) {
+        const u = new URL(String(input));
+        expect(u.searchParams.get("module")).toBe("proxy");
+        expect(u.searchParams.get("action")).toBe("eth_call");
+        expect(u.searchParams.get("chainid")).toBe("5000");
+        expect(u.searchParams.get("apikey")).toBeTruthy();
+      }
+      expect(new Set(urls)).toEqual(new Set(["https://api.etherscan.io/v2/api"]));
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("HERMETIC: touches the network on no test machine, key or no key", async () => {
+    // The suite default (see setup.ts). Same fixture as above, minus the key:
+    // the fallback must reject in process rather than reach for a socket, and
+    // the unread route must read back as unread — never as a positive claim.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      expect(process.env.ETHERSCAN_API_KEY).toBeUndefined();
+      const snap = await readSnapshot(
+        OFT,
+        chainRef([{ url: "p0", provider: "official" }], { etherscanFree: true }),
+        deps({
+          makeClient: makeFactory({ p0: { handler: failHandler } }, []),
+          discoverPeers: async () => null,
+        }),
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(snap.routes).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("corridor discovery — Multicall3 batching", () => {

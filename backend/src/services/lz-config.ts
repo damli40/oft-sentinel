@@ -842,13 +842,22 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
 
   /**
    * Batched sibling of resilientCall. One entry per input call, in input order.
-   * `null` == this sub-call yielded no data, and is handled identically to a
-   * thrown resilientCall today.
    *
-   * Transport failures (429, timeout) kill the WHOLE batch and fall through the
-   * client list, then degrade to per-call resilientCall. They never surface as a
-   * per-call `null` — that distinction is what keeps a rate limit from reading as
-   * a contract revert, which would suppress a CRITICAL (see isRevert's note).
+   * `null` == NO ANSWER for this sub-call. It does not distinguish "the chain
+   * said nothing" from "we never managed to ask", and it must not be read as
+   * either — it is exactly the old per-call decode-guard `catch`, and every
+   * caller in this file treats it as UNREAD. A null may never be decoded into
+   * `false`, `0`, an empty DVN set, or any other positive claim; that is the
+   * invariant, and it is what keeps a rate limit from clearing a CRITICAL (see
+   * isRevert's note).
+   *
+   * What a transport failure does NOT do is stop at the first null. A 429 or a
+   * timeout kills the WHOLE batch and escalates: the next client's batch, then
+   * per-call resilientCall (primary retry → every fallback → Etherscan where the
+   * chain supports it). Only when that entire chain is exhausted does the entry
+   * fall to `null`, via the `.catch(() => null)` below. So null is the terminal
+   * state of a fully-degraded read, not a shortcut past one — the escalation is
+   * the guarantee here, not the absence of nulls.
    */
   async function resilientBatch(calls: Call[]): Promise<(string | null)[]> {
     if (calls.length === 0) return [];
