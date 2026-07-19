@@ -5,8 +5,8 @@ import {
   ENDPOINT, OFT, OWNER, SENDLIB, RECVLIB, PEER, ETH_EID,
   SEL, peersRet, ulnZero, ulnDiff, ZERO_ULN,
   AGG3_SEL, multicallHandler, MANY_EIDS, manyEidMap, peerForEid, perEidPeers,
-  fullHandler, failHandler, makeFactory, chainRef, deps,
-  installHermeticChainRegistry,
+  fullHandler, failHandler, makeFactory, chainRef, deps, eidMapDep,
+  installHermeticChainRegistry, revertWith, word, type Handler,
 } from "./helpers/fake-rpc.js";
 
 installHermeticChainRegistry();
@@ -225,6 +225,150 @@ describe("corridor discovery — Multicall3 batching", () => {
       unbatched.routes.map((r) => r.peer).sort(),
     );
     expect(unbatched.routes.length).toBeGreaterThan(0); // guard against vacuous equality
+  });
+});
+
+describe("send-side ULN — Multicall3 batching", () => {
+  // The whole-snapshot equivalence assertion. Any behavioural difference between
+  // the batched and unbatched read paths is a bug, not a tradeoff, so the check
+  // is on the ENTIRE snapshot (minus the wall-clock stamp) rather than on the
+  // handful of fields a given task happened to touch.
+  //
+  // Run over BOTH corridor fixtures. The single-EID map makes every wave-1 batch
+  // 4 calls and every wave-2 batch 1 — too small to expose a chunk boundary or a
+  // result/route misalignment. The 120-corridor map makes wave 1 480 calls (10
+  // chunks) and wave 2 120 (3 chunks), with a distinct peer per EID, so a batch
+  // result landing on a neighbouring route shows up as a wrong peer.
+  //
+  // `maxRatio` is per fixture because the saving is not uniform: a handful of
+  // reads (decimals, owner, the sendability probe, the cross-check) are per-OFT
+  // or deliberately unbatched, and at one corridor that fixed overhead dominates.
+  // The saving is proportional to corridor count, which is the point.
+  const fixtures: [string, () => Promise<Record<number, { chainKey: string; endpoint: `0x${string}` }>>, number][] = [
+    ["single corridor", eidMapDep as any, 1],
+    ["120 corridors", manyEidMap as any, 3],
+  ];
+
+  it.each(fixtures)(
+    "EQUIVALENCE: identical snapshot with and without multicall (%s)",
+    async (_name, loadEidMap, maxRatio) => {
+      const { handler } = fullHandler();
+      // An all-healthy fixture makes equivalence cheap: with every sub-call
+      // succeeding, the two paths cannot disagree about what a FAILED read means,
+      // and that is the only place they differ. So some corridors fail some reads.
+      //
+      // The revert payloads are deliberately WELL-FORMED for their decoder — a
+      // 32-byte word that reads as a perfectly good library address, and a
+      // bytes-encoding that reads as non-empty enforced options. That is the
+      // hazard: on the batched path only the aggregate3 success flag says these
+      // failed, and a decoder that skips it mints a send library out of a revert
+      // (and then reads a wave-2 ULN against it) or asserts enforced options are
+      // set on a route we could not read. Junk payloads would be rejected by the
+      // decoders anyway and prove nothing.
+      //
+      // Only EIDs from the 120-corridor map are affected, so the single-corridor
+      // case stays the all-healthy one.
+      const addrShapedRevert = revertWith("0x" + word(("0x" + "de".repeat(20))));
+      const bytesShapedRevert = revertWith(
+        "0x" + word("20") + word("2") + "beef".padEnd(64, "0"),
+      );
+      const failing: Handler = (to, data) => {
+        const sel = data.slice(0, 10);
+        const eid =
+          sel === SEL.enforcedOptions ? parseInt(data.slice(10, 74), 16)
+          : sel === SEL.getSendLibrary ? parseInt(data.slice(74, 138), 16)
+          : sel === SEL.getConfig ? parseInt(data.slice(138, 202), 16)
+          : -1;
+        if (eid >= 40_000) {
+          if (sel === SEL.enforcedOptions && eid % 7 === 3) return bytesShapedRevert;
+          if (sel === SEL.getSendLibrary && eid % 13 === 4) return addrShapedRevert;
+          if (sel === SEL.getConfig && eid % 11 === 5) return "0x";
+        }
+        return handler(to, data);
+      };
+      const inner = perEidPeers(failing);
+
+      const logPlain: string[] = [];
+      _resetCorridorCache();
+      const plain = await readSnapshot(
+        OFT,
+        chainRef([{ url: "u1", provider: "p1" }], { multicall3: false }),
+        deps({ makeClient: makeFactory({ u1: { handler: inner } }, logPlain), loadEidMap }),
+      );
+
+      // Cache would make the second read skip discovery entirely and prove nothing.
+      _resetCorridorCache();
+      const logBatch: string[] = [];
+      const batched = await readSnapshot(
+        OFT,
+        chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+        deps({
+          makeClient: makeFactory({ u1: { handler: multicallHandler(inner) } }, logBatch),
+          loadEidMap,
+        }),
+      );
+
+      const { capturedAt: _a, ...batchedRest } = batched;
+      const { capturedAt: _b, ...plainRest } = plain;
+      expect(batchedRest).toEqual(plainRest);
+      expect(plain.routes.length).toBeGreaterThan(0); // guard against vacuous equality
+      if (plain.routes.length > 1) {
+        // The failure fixture is doing its job — otherwise "the two paths agree"
+        // would only mean "neither path had to decide what a failed read means".
+        expect(plain.routes.filter((r) => r.hasEnforcedOptions === null).length).toBeGreaterThan(0);
+        expect(plain.routes.filter((r) => r.sendLibrary === null).length).toBeGreaterThan(0);
+        expect(plain.routes.filter((r) => r.uln === null).length).toBeGreaterThan(0);
+      }
+      // The point of the change: far fewer round trips for the same answer.
+      expect(logBatch.length).toBeLessThan(logPlain.length / maxRatio);
+    },
+  );
+
+  it("routes send-side reads through aggregate3, not one call per selector", async () => {
+    const log: string[] = [];
+    const { handler } = fullHandler();
+    await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory({ u1: { handler: multicallHandler(perEidPeers(handler)) } }, log),
+        loadEidMap: manyEidMap,
+      }),
+    );
+    // Every send-side selector now arrives inside an aggregate3 payload. The
+    // secondary cross-check getConfig is the one deliberate exception, and it
+    // cannot appear here because this chain has a single RPC (no secondary).
+    for (const sel of [SEL.getSendLibrary, SEL.isDefaultSendLibrary, SEL.getReceiveLibrary, SEL.getConfig, SEL.enforcedOptions]) {
+      expect(log.filter((l) => l.endsWith("|" + sel))).toEqual([]);
+    }
+    expect(log.filter((l) => l.includes(AGG3_SEL)).length).toBeGreaterThan(0);
+  });
+
+  it("keeps the rpcConflict cross-check on the individual path, against the OTHER provider", async () => {
+    // The cross-check exists to have a SECOND provider corroborate the primary's
+    // ULN. Routed through resilientBatch it would go back to the primary client
+    // and agree with itself by construction — the check would still "run", still
+    // pass, and never flag a manipulated read again.
+    const log: string[] = [];
+    const snap = await readSnapshot(
+      OFT,
+      chainRef(
+        [{ url: "p0", provider: "official" }, { url: "p1", provider: "drpc" }],
+        { multicall3: true },
+      ),
+      deps({
+        makeClient: makeFactory(
+          {
+            p0: { handler: multicallHandler(fullHandler(ulnZero).handler) },
+            p1: { handler: multicallHandler(fullHandler(ulnDiff).handler) },
+          },
+          log,
+        ),
+      }),
+    );
+    expect(snap.routes[0].rpcConflict).toBe(true);
+    // …and it went out as a bare getConfig on p1, never as a batch.
+    expect(log).toContain(`p1|${SEL.getConfig}`);
   });
 });
 

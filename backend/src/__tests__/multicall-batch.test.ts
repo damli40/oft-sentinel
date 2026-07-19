@@ -71,17 +71,93 @@ describe("resilientBatch", () => {
     expect(snap.routes[0].sendLibrary).not.toBeNull();
   });
 
+  it("BATCH FALLBACK: a failing primary batch is retried as a BATCH on the next client", async () => {
+    // Pins the `...fallbackClients` half of resilientBatch's client loop, which
+    // the outcome-only SAFETY test above cannot: with the fallbacks dropped from
+    // that loop the read still comes back correct, just one eth_call per
+    // sub-call — silently forfeiting the entire saving on any chain whose
+    // primary RPC is flaky, which is exactly when the call budget matters most.
+    const log: string[] = [];
+    const { handler } = fullHandler();
+    const rateLimited: Handler = (to, data) => {
+      if (data.slice(0, 10) === AGG3_SEL) throw new Error("429 Too Many Requests");
+      return handler(to, data);
+    };
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([rpc("u1", "p1"), rpc("u2", "p2")], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          { u1: { handler: rateLimited }, u2: { handler: multicallHandler(handler) } },
+          log,
+        ),
+      }),
+    );
+    expect(snap.routes[0].sendLibrary).not.toBeNull();
+    // The recovery was a batch on u2 …
+    expect(log).toContain(`u2|${AGG3_SEL}`);
+    // … not a degrade to one call per selector. getSendLibrary is only ever
+    // batched now, so a bare one here means the per-call path ran.
+    expect(log.filter((l) => l.endsWith(`|${SEL.getSendLibrary}`))).toEqual([]);
+  });
+
+  it("BATCH FALLBACK: when EVERY client refuses the batch, it degrades to per-call", async () => {
+    // The other half of the loop. Refusing the batch must never mean refusing
+    // the read — an unreadable config reads downstream as "nothing to report".
+    const log: string[] = [];
+    const { handler } = fullHandler();
+    const noBatch: Handler = (to, data) => {
+      if (data.slice(0, 10) === AGG3_SEL) throw new Error("429 Too Many Requests");
+      return handler(to, data);
+    };
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([rpc("u1", "p1"), rpc("u2", "p2")], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          { u1: { handler: noBatch }, u2: { handler: noBatch } },
+          log,
+        ),
+      }),
+    );
+    // Both clients were asked for a batch before giving up on batching.
+    expect(log).toContain(`u1|${AGG3_SEL}`);
+    expect(log).toContain(`u2|${AGG3_SEL}`);
+    // And the config still came back, in full, via individual calls.
+    expect(snap.routes[0].sendLibrary).not.toBeNull();
+    expect(snap.routes[0].uln).not.toBeNull();
+    expect(snap.routes[0].hasEnforcedOptions).toBe(false);
+    expect(log.filter((l) => l.endsWith(`|${SEL.getSendLibrary}`)).length).toBeGreaterThan(0);
+  });
+
   it("maps a genuinely reverting sub-call to null without harming its neighbours", async () => {
     const log: string[] = [];
     const { handler } = fullHandler();
-    // enforcedOptions reverts; everything else is fine.
+    // enforcedOptions reverts WITH data — the discriminating shape. A sub-call
+    // that merely returns nothing can be detected by an empty-bytes check; a
+    // require(false, msg) comes back as success=false with a well-formed
+    // Error(string) payload, and only the success flag says it failed. Read as
+    // return data, decodeBytesNonEmpty would answer `true` off that payload:
+    // "this route HAS enforced options", invented out of a revert.
     const partial: Handler = (to, data) =>
-      data.slice(0, 10) === SEL.enforcedOptions ? "0x" : handler(to, data);
+      data.slice(0, 10) === SEL.enforcedOptions
+        ? errorStringRevert("enforcedOptions unavailable")
+        : handler(to, data);
     const snap = await readSnapshot(OFT, chainRef([rpc("u1", "p1")], { multicall3: true }), deps({
       makeClient: makeFactory({ u1: { handler: multicallHandler(partial) } }, log),
     }));
-    expect(snap.routes[0].hasEnforcedOptions).toBeNull(); // the failed one
-    expect(snap.routes[0].sendLibrary).not.toBeNull();     // its neighbours survived
+    // null, NOT false. `false` is the positive claim "no enforced options are
+    // set", and nothing we read supports it — the read failed. `false` here
+    // would silently clear the missing-enforced-options finding on every route
+    // whose enforcedOptions call the RPC could not serve.
+    expect(snap.routes[0].hasEnforcedOptions).toBeNull();
+    expect(snap.routes[0].hasEnforcedOptions).not.toBe(false);
+    // Its batch neighbours — the other three wave-1 reads for this route, and
+    // the wave-2 ULN that depends on one of them — are untouched.
+    expect(snap.routes[0].sendLibrary).not.toBeNull();
+    expect(snap.routes[0].sendLibIsDefault).toBe(false);
+    expect(snap.routes[0].receiveLibrary).not.toBeNull();
+    expect(snap.routes[0].uln).not.toBeNull();
   });
 
   it("BLAST RADIUS: an undecodable peers() word costs that corridor, not the snapshot", async () => {

@@ -953,56 +953,100 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
 
   const liveClients = [srcClient, ...fallbackClients];
 
-  await Promise.all(
-    activeEids.map(async (eid) => {
-      const chainInfo = eidMap[eid];
-      const route: RouteSnapshot = {
-        eid,
-        chainName: chainInfo?.chainKey ?? `eid-${eid}`,
-        chainKey: chainInfo?.chainKey ?? null,
-        sendLibrary: null,
-        sendLibIsDefault: null,
-        receiveLibrary: null,
-        receiveLibIsDefault: null,
-        uln: null,
-        receiveUln: null,
-        peer: peerAddresses[eid] ?? null,
-        peerAddress: peerAddresses[eid] ?? null,
-        hasEnforcedOptions: null,
-        isActive: true,
-      };
+  // Build every route shell up front, so batch results can be assigned by index.
+  // This is the largest fan-out in the read path — ~6 eth_calls per corridor,
+  // times every corridor, times every OFT. Batched it is two round trips per OFT
+  // (plus chunking), and the answer must be byte-identical either way.
+  const routeList: RouteSnapshot[] = activeEids.map((eid) => {
+    const chainInfo = eidMap[eid];
+    return {
+      eid,
+      chainName: chainInfo?.chainKey ?? `eid-${eid}`,
+      chainKey: chainInfo?.chainKey ?? null,
+      sendLibrary: null,
+      sendLibIsDefault: null,
+      receiveLibrary: null,
+      receiveLibIsDefault: null,
+      uln: null,
+      receiveUln: null,
+      peer: peerAddresses[eid] ?? null,
+      peerAddress: peerAddresses[eid] ?? null,
+      hasEnforcedOptions: null,
+      isActive: true,
+    };
+  });
 
-      try {
-        route.sendLibrary = decodeAddr(
-          await resilientCall(ENDPOINT, SEL.getSendLibrary + padAddr(oftAddr) + padU32(eid))
-        );
-      } catch { /* null */ }
+  // ── Wave 1: the four reads that depend on no prior result ─────────────────
+  // Two waves rather than one because the send-side ULN getConfig needs the
+  // library address that getSendLibrary returns. Everything address-independent
+  // goes first.
+  const w1: Call[] = [];
+  for (const r of routeList) {
+    w1.push({ target: ENDPOINT, callData: SEL.getSendLibrary + padAddr(oftAddr) + padU32(r.eid) });
+    w1.push({ target: ENDPOINT, callData: SEL.isDefaultSendLibrary + padAddr(oftAddr) + padU32(r.eid) });
+    w1.push({ target: ENDPOINT, callData: SEL.getReceiveLibrary + padAddr(oftAddr) + padU32(r.eid) });
+    // enforcedOptions msgType 1 (lzReceive). Non-empty bytes = options set.
+    w1.push({ target: oftAddr, callData: SEL.enforcedOptions + padU32(r.eid) + padU32(1) });
+  }
+  const w1res = await resilientBatch(w1);
 
-      try {
-        const r = await resilientCall(ENDPOINT, SEL.isDefaultSendLibrary + padAddr(oftAddr) + padU32(eid));
-        route.sendLibIsDefault = r && r !== "0x" ? BigInt(r) !== 0n : null;
-      } catch { /* null */ }
+  routeList.forEach((route, i) => {
+    const base = i * 4;
+    const sendLib = w1res[base];
+    const isDef = w1res[base + 1];
+    const recvLib = w1res[base + 2];
+    const enf = w1res[base + 3];
 
+    // A null here is exactly the old `catch { /* null */ }` branch: we did not
+    // get an answer, so the field stays unread. Each decode keeps its own guard
+    // because each can throw independently, and one unreadable field must not
+    // cost the other three.
+    if (sendLib) { try { route.sendLibrary = decodeAddr(sendLib); } catch { /* null */ } }
+    // Reproduces `r && r !== "0x" ? BigInt(r) !== 0n : null` exactly:
+    // resilientBatch already maps an empty return to null.
+    if (isDef) { try { route.sendLibIsDefault = BigInt(isDef) !== 0n; } catch { /* null */ } }
+    if (recvLib) {
       try {
-        const [lib, isDefault] = decodeAddressBool(
-          await resilientCall(ENDPOINT, SEL.getReceiveLibrary + padAddr(oftAddr) + padU32(eid))
-        );
+        const [lib, isDefault] = decodeAddressBool(recvLib);
         route.receiveLibrary = lib;
         route.receiveLibIsDefault = isDefault;
       } catch { /* null */ }
+    }
+    // A null MUST stay null, never false. `false` is the positive claim "this
+    // route has no enforced options", and we did not read that — we failed to
+    // read anything. decodeBytesNonEmpty is null-safe, but calling it on a null
+    // and letting the result stand would be the same mistake in a different
+    // place, so the guard is explicit.
+    if (enf) { try { route.hasEnforcedOptions = decodeBytesNonEmpty(enf); } catch { /* null */ } }
+  });
 
-      if (route.sendLibrary) {
-        try {
-          route.uln = decodeUlnConfig(
-            await resilientCall(ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
-          );
-        } catch { /* null */ }
-      }
+  // ── Wave 2: send-side ULN, which needs wave 1's library address ───────────
+  const w2routes = routeList.filter((r) => r.sendLibrary);
+  const w2: Call[] = w2routes.map((r) => ({
+    target: ENDPOINT,
+    callData: SEL.getConfig + padAddr(oftAddr) + padAddr(r.sendLibrary!) + padU32(r.eid) + padU32(2),
+  }));
+  const w2res = await resilientBatch(w2);
+  w2routes.forEach((route, i) => {
+    const raw = w2res[i];
+    if (raw) { try { route.uln = decodeUlnConfig(raw); } catch { /* null */ } }
+  });
+
+  await Promise.all(
+    routeList.map(async (route) => {
+      const eid = route.eid;
+      const chainInfo = eidMap[eid];
 
       // ── RPC source-conflict check ────────────────────────────────────────
-      // Cross-check the send-side ULN against a secondary Mantle RPC.
+      // Cross-check the send-side ULN against a secondary, DIFFERENT-provider RPC.
       // Disagreement on requiredDVNs / counts / optionalDVNThreshold flags the route
       // as potentially manipulated — surfaced as CRITICAL in assessSnapshot.
+      //
+      // This one stays on the individual path deliberately. resilientBatch reads
+      // from the primary client (falling through the client list only on transport
+      // failure), so batching this call would have the primary corroborate itself:
+      // the check would still run, still pass, and never detect a conflict again.
+      // The whole point is that a SECOND provider answers it.
       if (route.sendLibrary && route.uln && secondaryClient) {
         try {
           const fbUln = decodeUlnConfig(
@@ -1020,13 +1064,6 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
           }
         } catch { /* secondary unavailable — skip check */ }
       }
-
-      // ── Enforced options ────────────────────────────────────────────────
-      try {
-        // Check msgType 1 (lzReceive). Non-zero / non-empty bytes = options set.
-        const enf = await resilientCall(oftAddr, SEL.enforcedOptions + padU32(eid) + padU32(1));
-        route.hasEnforcedOptions = decodeBytesNonEmpty(enf);
-      } catch { /* null */ }
 
       // ── Step 3: destination-side receive ULN (for mismatch detection) ────
       // Destination RPC comes from the registry now (every eligible chain), not

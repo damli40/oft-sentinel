@@ -111,7 +111,13 @@ export function fullHandler(uln = ulnZero, ownerCode = "0xabcd"): { handler: Han
     switch (data.slice(0, 10)) {
       case SEL.peers: return peersRet(PEER);
       case SEL.getSendLibrary: return addrWord(SENDLIB);
-      case SEL.isDefaultSendLibrary: return boolWord(false);
+      // 0x-prefixed, like every real RPC return. Without the prefix the plain
+      // path still read it as `false` (BigInt of a zero-word), while the batched
+      // path handed the unprefixed string to viem's bytes encoder and got a
+      // NON-zero payload back — so the same fixture produced `false` unbatched
+      // and `true` batched. A harness that answers in a shape no chain emits
+      // cannot testify about equivalence.
+      case SEL.isDefaultSendLibrary: return "0x" + boolWord(false);
       case SEL.getReceiveLibrary: return addrBoolRet(RECVLIB, false);
       case SEL.getConfig: return uln;
       case SEL.enforcedOptions: return enforcedEmpty;
