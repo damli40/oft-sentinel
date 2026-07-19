@@ -104,6 +104,35 @@ describe("chunk", () => {
     expect(() => chunk([1, 2, 3], 0)).toThrow("chunk size must be positive");
     expect(() => chunk([1, 2, 3], -1)).toThrow("chunk size must be positive");
   });
+
+  /**
+   * NaN fails every comparison, so the original `size <= 0` guard let it past:
+   * `i += NaN` never advanced, and chunk([1,2,3], NaN) returned [[]] — one empty
+   * chunk for three inputs, no throw. Downstream that is zero RPC calls and zero
+   * results reported for N calls, which reads as "nothing to report".
+   */
+  it.each([NaN, Infinity, -Infinity])(
+    "throws on a non-finite size of %s rather than dropping every input",
+    (size) => {
+      expect(() => chunk([1, 2, 3], size)).toThrow("chunk size must be positive");
+    },
+  );
+
+  it.each([0.5, 1.5, 2.9])(
+    "throws on a fractional size of %s rather than emitting empty chunks",
+    (size) => {
+      // chunk([1,2,3], 0.5) produced [[],[1],[],[2],[],[3]] — every empty chunk
+      // is a wasted RPC round-trip carrying no sub-calls.
+      expect(() => chunk([1, 2, 3], size)).toThrow("chunk size must be positive");
+    },
+  );
+
+  it("keeps every element when the size is a valid integer", () => {
+    // Guard against a fix that rejects too much: integers must still work.
+    for (const size of [1, 2, 3, 7]) {
+      expect(chunk([1, 2, 3], size).flat()).toEqual([1, 2, 3]);
+    }
+  });
 });
 
 /**
@@ -366,6 +395,58 @@ describe("aggregate3Batch", () => {
       aggregate3Batch(call, [{ target: A, callData: "0x01" }]),
     ).rejects.toThrow("429");
   });
+
+  /**
+   * The silent-zero-results bug, at the level callers actually see it. Before the
+   * chunk guard, aggregate3Batch(call, <3 calls>, NaN) resolved to [] — length 0,
+   * no throw, and the RPC was never even attempted. The per-chunk row-count check
+   * could not catch it: with no chunks, that check never runs.
+   */
+  it.each([NaN, Infinity, 0, -1, 0.5])(
+    "throws on an invalid chunkSize of %s rather than resolving to zero results",
+    async (chunkSize) => {
+      const call = vi.fn(async () => encodeResults([{ success: true, returnData: "0xaa" }]));
+      const calls: Call[] = [
+        { target: A, callData: "0x01" },
+        { target: B, callData: "0x02" },
+        { target: A, callData: "0x03" },
+      ];
+      await expect(aggregate3Batch(call, calls, chunkSize)).rejects.toThrow(
+        "chunk size must be positive",
+      );
+      // The shape that made this dangerous: no RPC attempted at all.
+      expect(call).not.toHaveBeenCalled();
+    },
+  );
+
+  /**
+   * The documented postcondition — "one entry per input call, in input order" —
+   * asserted directly rather than inferred from the chunk-local row check.
+   */
+  it.each([1, 2, 3, 5, 50])(
+    "returns exactly one entry per input call at chunkSize %s",
+    async (chunkSize) => {
+      const calls: Call[] = Array.from({ length: 7 }, (_, i) => ({
+        target: A,
+        callData: `0x0${i}`,
+      }));
+      const call = async (_to: Address, data: string) =>
+        encodeResults(
+          decodeCalls(data).map((c) => ({ success: true, returnData: c.callData })),
+        );
+
+      const out = await aggregate3Batch(call, calls, chunkSize);
+
+      expect(out).toHaveLength(calls.length);
+      expect(out).toEqual(calls.map((c) => c.callData));
+    },
+  );
+
+  it("returns an empty array for no input calls without contacting the node", async () => {
+    const call = vi.fn(async () => encodeResults([]));
+    expect(await aggregate3Batch(call, [])).toEqual([]);
+    expect(call).not.toHaveBeenCalled();
+  });
 });
 
 describe("env configuration", () => {
@@ -394,7 +475,7 @@ describe("env configuration", () => {
     expect(m.FALLBACK_CONCURRENCY).toBe(8);
   });
 
-  it.each(["", "fifty", "0", "-1", "2.5", "NaN"])(
+  it.each(["fifty", "0", "-1", "2.5", "NaN"])(
     "fails loudly at import on MULTICALL_CHUNK_SIZE=\"%s\"",
     async (bad) => {
       vi.stubEnv("MULTICALL_CHUNK_SIZE", bad);
@@ -403,7 +484,7 @@ describe("env configuration", () => {
     },
   );
 
-  it.each(["", "four", "0", "-2", "1.5"])(
+  it.each(["four", "0", "-2", "1.5"])(
     "fails loudly at import on FALLBACK_CONCURRENCY=\"%s\"",
     async (bad) => {
       vi.stubEnv("FALLBACK_CONCURRENCY", bad);
@@ -411,4 +492,47 @@ describe("env configuration", () => {
       await expect(load()).rejects.toThrow(/FALLBACK_CONCURRENCY must be a positive integer/);
     },
   );
+
+  /**
+   * A blank value is an empty field, not a typo. `FALLBACK_CONCURRENCY=` in a
+   * .env, or a variable cleared in the Railway dashboard, reaches the process as
+   * "" — and this is a production monitor, so booting on the documented default
+   * beats refusing to boot at all. Distinct from the malformed cases above,
+   * which still throw.
+   */
+  it.each(["", "   ", "\t"])(
+    "falls back to the default on a blank MULTICALL_CHUNK_SIZE=\"%s\"",
+    async (blank) => {
+      vi.stubEnv("MULTICALL_CHUNK_SIZE", blank);
+      vi.resetModules();
+      const m = await load();
+      expect(m.MULTICALL_CHUNK_SIZE).toBe(50);
+    },
+  );
+
+  it.each(["", "   ", "\t"])(
+    "falls back to the default on a blank FALLBACK_CONCURRENCY=\"%s\"",
+    async (blank) => {
+      vi.stubEnv("FALLBACK_CONCURRENCY", blank);
+      vi.resetModules();
+      const m = await load();
+      expect(m.FALLBACK_CONCURRENCY).toBe(4);
+    },
+  );
+
+  it("still boots both values on defaults when both are blank at once", async () => {
+    vi.stubEnv("MULTICALL_CHUNK_SIZE", "");
+    vi.stubEnv("FALLBACK_CONCURRENCY", "");
+    vi.resetModules();
+    const m = await load();
+    expect(m.MULTICALL_CHUNK_SIZE).toBe(50);
+    expect(m.FALLBACK_CONCURRENCY).toBe(4);
+  });
+
+  it("does not treat a padded but valid value as blank", async () => {
+    vi.stubEnv("MULTICALL_CHUNK_SIZE", " 25 ");
+    vi.resetModules();
+    const m = await load();
+    expect(m.MULTICALL_CHUNK_SIZE).toBe(25);
+  });
 });

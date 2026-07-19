@@ -14,9 +14,21 @@ export const MULTICALL3_ADDRESS =
  * or 0 does not fail — it produces empty or truncated result sets, which read
  * downstream as "nothing to report" and suppress findings. Failing at import
  * is the safe direction: a process that will not start cannot mis-report.
+ *
+ * Blank is the one exception, and it is a different kind of input. A bare
+ * `MULTICALL_CHUNK_SIZE=` in a .env file, or an env var cleared to "" in the
+ * Railway dashboard, carries no value and no typo — it is an empty field, not a
+ * wrong one. This runs as a production monitor, so refusing to boot on an empty
+ * field is the worse outcome: the default is known-good and documented, and a
+ * running monitor on defaults beats a dead one. Whitespace-only is treated the
+ * same, since a value of " " survives copy-paste and shell quoting unnoticed.
+ *
+ * A genuinely malformed value ("abc", "0", "-1", "2.5") still throws. Those say
+ * someone meant something specific and got it wrong, and guessing past a typo is
+ * how a 5000-call chunk size or a concurrency of 0 reaches production unnoticed.
  */
 function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
-  if (raw === undefined) return fallback;
+  if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(
@@ -99,7 +111,17 @@ export function decodeAggregate3(returnData: string): CallResult[] {
 }
 
 export function chunk<T>(items: T[], size: number): T[][] {
-  if (size <= 0) throw new Error("chunk size must be positive");
+  // `size <= 0` alone is not enough, because NaN fails every comparison:
+  // `NaN <= 0` is false, so NaN slipped through and `i += NaN` never advanced
+  // past the first iteration — chunk(items, NaN) returned [[]], and the caller
+  // then made zero RPC calls and reported zero results for N inputs. A
+  // fractional size is the milder cousin: chunk([1,2,3], 0.5) yields
+  // [[],[1],[],[2],[],[3]], spending an empty round-trip per empty chunk.
+  // Require a positive integer outright, matching mapLimit's Number.isFinite
+  // guard below.
+  if (!Number.isInteger(size) || size < 1) {
+    throw new Error(`chunk size must be positive integer, got ${String(size)}`);
+  }
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
@@ -141,6 +163,17 @@ export async function aggregate3Batch(
     for (const r of rows) {
       out.push(r.success && r.returnData && r.returnData !== "0x" ? r.returnData : null);
     }
+  }
+  // Assert the postcondition this function's docstring promises ("one entry per
+  // input call, in input order"). The per-chunk check above is chunk-local and
+  // passes vacuously when there are no chunks at all (0 === 0), so it cannot
+  // catch a chunker that dropped every input. Anything that makes out.length
+  // disagree with calls.length has silently lost or invented reads, and a lost
+  // read reads downstream as "nothing to report".
+  if (out.length !== calls.length) {
+    throw new Error(
+      `multicall produced ${out.length} results for ${calls.length} calls`,
+    );
   }
   return out;
 }
