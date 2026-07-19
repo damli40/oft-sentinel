@@ -6,7 +6,7 @@ import {
   SEL, peersRet, ulnZero, ulnDiff, ZERO_ULN,
   AGG3_SEL, multicallHandler, MANY_EIDS, manyEidMap, peerForEid, perEidPeers,
   fullHandler, failHandler, makeFactory, chainRef, deps, eidMapDep,
-  installHermeticChainRegistry, revertWith, word, type Handler,
+  installHermeticChainRegistry, revertWith, word, buildUln, type Handler,
 } from "./helpers/fake-rpc.js";
 
 installHermeticChainRegistry();
@@ -321,6 +321,73 @@ describe("send-side ULN — Multicall3 batching", () => {
       }
       // The point of the change: far fewer round trips for the same answer.
       expect(logBatch.length).toBeLessThan(logPlain.length / maxRatio);
+    },
+  );
+
+  it.each([true, false])(
+    "ORDERING: every eid keeps its OWN wave-2 ULN across the FILTERED call list (multicall3=%s)",
+    async (multicall3) => {
+      // Wave 2 does not read every route: it builds its call list from
+      // `routeList.filter(r => r.sendLibrary)` and then assigns results back by
+      // index over that FILTERED list. So there are two index spaces here, and
+      // they diverge the moment any route fails its getSendLibrary read.
+      // Assigning w2 results over `routeList` instead of `w2routes` shifts every
+      // ULN past the first send-library-less route onto a neighbouring corridor —
+      // a route's DVN set, and therefore its security verdict, would be read off
+      // some other chain's config.
+      //
+      // Two things are needed to see it, and the 120-corridor equivalence fixture
+      // has neither: the filter must actually REMOVE entries (otherwise the two
+      // index spaces are identical), and each eid's ULN must be DISTINCT
+      // (otherwise a shifted ULN is indistinguishable from the right one — the
+      // shared fixture answers the same ulnZero for all 120). Mirrors the peer
+      // ORDERING test below, which pins the same property for discovery.
+      //
+      // Run on both paths: the misassignment lives in the post-batch code they
+      // share, so an identical shift on both would cancel out of any
+      // batched-vs-unbatched equivalence assertion.
+      const { handler } = fullHandler();
+      const noSendLib = (eid: number) => eid % 13 === 4;
+      const inner: Handler = (to, data) => {
+        const sel = data.slice(0, 10);
+        // A route with no send library is filtered OUT of wave 2, which is what
+        // makes the filtered index space shorter than routeList's.
+        if (sel === SEL.getSendLibrary) {
+          return noSendLib(parseInt(data.slice(74, 138), 16)) ? "0x" : handler(to, data);
+        }
+        // requiredDVNCount doubles as a tag naming the eid this config belongs to.
+        if (sel === SEL.getConfig) return buildUln(parseInt(data.slice(138, 202), 16) % 7);
+        return handler(to, data);
+      };
+      const snap = await readSnapshot(
+        OFT,
+        chainRef([{ url: "u1", provider: "p1" }], { multicall3 }),
+        deps({
+          makeClient: makeFactory(
+            { u1: { handler: multicall3 ? multicallHandler(perEidPeers(inner)) : perEidPeers(inner) } },
+            [],
+          ),
+          loadEidMap: manyEidMap,
+        }),
+      );
+
+      expect(snap.routes.length).toBe(MANY_EIDS.length);
+      for (const r of snap.routes) {
+        if (noSendLib(r.eid)) {
+          // Never in wave 2's call list, so it can only hold a ULN it was handed
+          // by mistake.
+          expect(r.sendLibrary).toBeNull();
+          expect(r.uln).toBeNull();
+        } else {
+          expect(r.uln).not.toBeNull();
+          expect(r.uln!.requiredDVNCount).toBe(r.eid % 7);
+        }
+      }
+      // Non-vacuity: the filter really did shorten the list, and there is a long
+      // tail of routes AFTER the first removal for a shift to land on.
+      const dropped = snap.routes.filter((r) => noSendLib(r.eid));
+      expect(dropped.length).toBeGreaterThan(1);
+      expect(snap.routes.length - dropped.length).toBeGreaterThan(50);
     },
   );
 

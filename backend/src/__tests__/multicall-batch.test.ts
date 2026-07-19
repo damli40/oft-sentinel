@@ -4,6 +4,7 @@ import {
   OFT, SEL, AGG3_SEL, fullHandler, makeFactory, multicallHandler,
   chainRef, rpc, deps, installHermeticChainRegistry, type Handler,
   MANY_EIDS, manyEidMap, peerForEid, perEidPeers, errorStringRevert,
+  revertWith, word, buildUln,
 } from "./helpers/fake-rpc.js";
 
 installHermeticChainRegistry();
@@ -133,15 +134,23 @@ describe("resilientBatch", () => {
   it("maps a genuinely reverting sub-call to null without harming its neighbours", async () => {
     const log: string[] = [];
     const { handler } = fullHandler();
-    // enforcedOptions reverts WITH data — the discriminating shape. A sub-call
-    // that merely returns nothing can be detected by an empty-bytes check; a
-    // require(false, msg) comes back as success=false with a well-formed
-    // Error(string) payload, and only the success flag says it failed. Read as
-    // return data, decodeBytesNonEmpty would answer `true` off that payload:
-    // "this route HAS enforced options", invented out of a revert.
+    // enforcedOptions reverts WITH data, and the payload is deliberately
+    // WELL-FORMED for its decoder: an abi-encoded `bytes` of length 2. Read as
+    // return data, decodeBytesNonEmpty answers `true` off it — "this route HAS
+    // enforced options", invented out of a revert. Only the aggregate3 success
+    // flag says the call failed.
+    //
+    // The payload shape is the whole point of this test. An Error(string) revert
+    // (what `require(false, msg)` emits) would make decodeBytesNonEmpty THROW,
+    // the decode guard would swallow it, and the field would land null by
+    // accident — green regardless of whether the success flag is read at all.
+    // With a decodable payload the null is only reachable via the success flag.
+    const bytesShapedRevert = revertWith(
+      "0x" + word("20") + word("2") + "beef".padEnd(64, "0"),
+    );
     const partial: Handler = (to, data) =>
       data.slice(0, 10) === SEL.enforcedOptions
-        ? errorStringRevert("enforcedOptions unavailable")
+        ? bytesShapedRevert
         : handler(to, data);
     const snap = await readSnapshot(OFT, chainRef([rpc("u1", "p1")], { multicall3: true }), deps({
       makeClient: makeFactory({ u1: { handler: multicallHandler(partial) } }, log),
