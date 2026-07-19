@@ -200,6 +200,9 @@ export interface ChainRef {
   chainId: number;
   eligible: boolean;
   etherscanFree: boolean;
+  /** Multicall3 verified deployed at the canonical address on this chain.
+   *  Absent/malformed in the registry ⇒ false ⇒ individual calls. */
+  multicall3: boolean;
   rpcs: ChainRpc[];
 }
 

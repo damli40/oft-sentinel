@@ -103,6 +103,7 @@ function chainRef(rpcs: { url: string; provider: string }[], over: Partial<Chain
     chainId: 5000,
     eligible: true,
     etherscanFree: false,
+    multicall3: false,
     rpcs,
     ...over,
   };

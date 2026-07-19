@@ -241,6 +241,28 @@ describe("missing / malformed file", () => {
   });
 });
 
+describe("multicall3 flag", () => {
+  it("defaults to false when the registry omits it", () => {
+    writeRegistry({ mantle: twoProviderChain }); // no multicall3 key at all
+    expect(getChainRef(5000)!.multicall3).toBe(false);
+  });
+
+  it("is true when the registry declares it", () => {
+    writeRegistry({ mantle: { ...twoProviderChain, multicall3: true } });
+    expect(getChainRef(5000)!.multicall3).toBe(true);
+  });
+
+  it("coerces a non-boolean to false", () => {
+    writeRegistry({ mantle: { ...twoProviderChain, multicall3: "yes" } });
+    expect(getChainRef(5000)!.multicall3).toBe(false);
+  });
+
+  it("does not let the flag affect eligibility", () => {
+    writeRegistry({ mantle: { ...twoProviderChain, multicall3: false } });
+    expect(getChainRef(5000)!.eligible).toBe(true);
+  });
+});
+
 describe("chainDisplayName", () => {
   it("capitalizes a plain chainKey", () => {
     expect(chainDisplayName("ethereum")).toBe("Ethereum");

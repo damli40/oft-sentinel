@@ -34,6 +34,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { normalizeProvider, meetsQuorum } from "../services/chain-registry.js";
+import { MULTICALL3_ADDRESS, mapLimit } from "../services/multicall.js";
 import type { ChainRef, ChainRpc } from "../types.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -161,18 +162,47 @@ async function verifyRpc(url: string, expectedChainId: number): Promise<boolean>
   return false;
 }
 
-/** Run `fn` over `items` with at most `limit` in flight. */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let i = 0;
-  const worker = async () => {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
+/** One eth_getCode against the canonical Multicall3 address.
+ *  `true`/`false` are DEFINITIVE answers from the chain; `null` means the
+ *  endpoint could not answer (timeout, non-2xx, JSON-RPC error, malformed body)
+ *  and says nothing about the chain — the caller must not read it as either. */
+async function probeMulticall3Once(rpcUrl: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", "user-agent": UA },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_getCode",
+        params: [MULTICALL3_ADDRESS, "latest"],
+      }),
+      signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { result?: unknown };
+    // A JSON-RPC error object leaves `result` absent — indistinguishable here
+    // from a malformed body, and neither is an answer about the chain.
+    if (typeof j?.result !== "string" || !j.result.startsWith("0x")) return null;
+    return j.result.length > 2;
+  } catch {
+    return null;
+  }
+}
+
+/** Is Multicall3 deployed at the canonical address on this chain?
+ *  Walks the chain's live-verified endpoints and takes the FIRST DEFINITIVE
+ *  answer. Consulting only rpcs[0] would let one flaky proxy decide: sei's
+ *  drpc endpoint returns "Temporary internal error" while sei-apis.com returns
+ *  the bytecode, which silently costs the chain its batching and makes the flag
+ *  flap between runs. Exhausting every endpoint without a definitive answer
+ *  yields false — an unprobed chain reads unbatched, which is always safe. */
+async function probeMulticall3(rpcUrls: string[]): Promise<boolean> {
+  for (const url of rpcUrls) {
+    const answer = await probeMulticall3Once(url);
+    if (answer !== null) return answer;
+  }
+  return false;
 }
 
 async function main(): Promise<void> {
@@ -212,6 +242,15 @@ async function main(): Promise<void> {
     passedByChain.get(p.chainKey)!.push(p.rpc);
   }
 
+  // Capability probe: eth_getCode per chain over its live-verified endpoints.
+  // Chains with no verified endpoint are simply left false.
+  const probeTargets = [...passedByChain.entries()].filter(([, rpcs]) => rpcs.length > 0);
+  const probeResults = await mapLimit(probeTargets, VERIFY_CONCURRENCY, async ([chainKey, rpcs]) => ({
+    chainKey,
+    multicall3: await probeMulticall3(rpcs.map((r) => r.url)),
+  }));
+  const multicall3ByChain = new Map(probeResults.map((r) => [r.chainKey, r.multicall3]));
+
   // Build the registry, sorted by chainKey.
   const chains: Record<string, ChainRef & { note: string }> = {};
   let eligibleCount = 0;
@@ -234,6 +273,7 @@ async function main(): Promise<void> {
       chainId: c.chainId,
       eligible,
       etherscanFree,
+      multicall3: multicall3ByChain.get(c.chainKey) === true,
       rpcs: rpcs.map((r) => ({ url: r.url, provider: r.provider })),
       note,
     };
@@ -254,6 +294,7 @@ async function main(): Promise<void> {
   console.log(`  endpoints verified: ${passedEndpoints} / ${totalEndpoints} (dropped ${totalEndpoints - passedEndpoints})`);
   console.log(`  skipped non-EVM   : ${skippedNonEvm.length}${skippedNonEvm.length ? " (" + skippedNonEvm.join(", ") + ")" : ""}`);
   console.log(`  etherscanFree     : ${Object.values(chains).filter((c) => c.etherscanFree).length}`);
+  console.log(`  multicall3        : ${Object.values(chains).filter((c) => c.multicall3).length}`);
   if (changedEligibility.length)
     console.log(`  eligibility changed vs sweep: ${changedEligibility.join(", ")}`);
   console.log(`  written to        : ${outputPath()}`);
