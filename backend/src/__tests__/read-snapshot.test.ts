@@ -7,8 +7,9 @@ import {
   AGG3_SEL, multicallHandler, MANY_EIDS, manyEidMap, peerForEid, perEidPeers,
   fullHandler, failHandler, makeFactory, chainRef, deps, eidMapDep,
   installHermeticChainRegistry, revertWith, word, buildUln, type Handler,
-  setChainRegistryChains, errorStringRevert,
+  setChainRegistryChains, errorStringRevert, MANTLE_EID, NONCE_SEL, makeInFlight,
 } from "./helpers/fake-rpc.js";
+import { FALLBACK_CONCURRENCY } from "../services/multicall.js";
 import type { ChainRef, RouteSnapshot } from "../types.js";
 
 installHermeticChainRegistry();
@@ -532,24 +533,76 @@ const hasDst = (eid: number) => eid % 3 !== 2;
  *  `needConfig` is in turn shorter than `jobs`. */
 const noRecvLib = (eid: number) => eid % 5 === 0;
 
+/** The source chain these destination reads are "from" — chainRef()'s default
+ *  eid. Every destination read asks about the REVERSE direction, so this is the
+ *  eid argument each one must carry. */
+const SRC_EID = MANTLE_EID;
+
+/** Eids the fixture knows. Used to reject a call aimed at a contract that is
+ *  not a peer at all (an endpoint, say), which is otherwise indistinguishable
+ *  from a peer whose address happens to parse. */
+const KNOWN_EIDS = new Set(MANY_EIDS);
+
+/**
+ * Two DIFFERENT endpoints, alternating WITHIN each destination bucket.
+ *
+ * `eidMap` is eid-keyed with a per-eid endpoint, and several eids share one
+ * `chainKey`. Storing the endpoint per destination-chain BUCKET would therefore
+ * hand every job the endpoint of whichever route opened the bucket, and every
+ * eid whose endpoint differs from the opener's would be read against the wrong
+ * contract. A fixture where every eid shares one endpoint cannot tell the
+ * per-job and per-bucket forms apart at all.
+ */
+const ENDPOINT_ALT = getAddress(("0x" + "e2".repeat(20)) as `0x${string}`);
+const endpointForEid = (eid: number) => (eid % 2 === 0 ? ENDPOINT : ENDPOINT_ALT);
+
 const splitEidMap = async () =>
   Object.fromEntries(
-    MANY_EIDS.map((e) => [e, { chainKey: dstKeyFor(e), endpoint: ENDPOINT }]),
+    MANY_EIDS.map((e) => [e, { chainKey: dstKeyFor(e), endpoint: endpointForEid(e) }]),
   );
 
 /**
  * Destination-chain handler. Every answer is derived from the PEER address in
  * the calldata (or, for peers(), from the contract being called), which is
  * unique per eid — so a result landing on the wrong route is visible.
+ *
+ * ⚠️ STRICT. It answers only a call that asks the RIGHT QUESTION, and returns
+ * `"0x"` otherwise. A fixture that derives its answer from the peer alone
+ * — consulting neither the eid argument, nor the config type, nor `to` — cannot
+ * observe WHAT was asked, only who it was asked about, so every calldata
+ * mutation that keeps the peer word intact survives it: a reversed eid
+ * argument, a call aimed at the peer instead of the endpoint, or a getConfig
+ * asking for config type 1.
+ *
+ * That last one is the sharpest. Type 1 is the EXECUTOR config; type 2 is the
+ * ULN config. `decodeUlnConfig` does not reject an executor config — it returns
+ * a NON-NULL UlnSnapshot of garbage. That is a null promoted into a positive
+ * assertion about the receive config, which is the exact CRITICAL-suppression
+ * this whole task exists to prevent, and it is invisible unless the fixture
+ * checks the config-type argument.
  */
 const dstHandler: Handler = (to, data) => {
   const sel = data.slice(0, 10);
+  const atEndpointOf = (eid: number) =>
+    to.toLowerCase() === endpointForEid(eid).toLowerCase();
+
+  // getReceiveLibrary(address _receiver, uint32 _srcEid) — on the ENDPOINT.
   if (sel === SEL.getReceiveLibrary) {
     const eid = eidOfAddr(data.slice(34, 74));
+    if (!KNOWN_EIDS.has(eid)) return "0x";
+    if (!atEndpointOf(eid)) return "0x";
+    if (parseInt(data.slice(74, 138), 16) !== SRC_EID) return "0x";
     return noRecvLib(eid) ? "0x" : "0x" + word(recvLibFor(eid)) + word("0");
   }
+
+  // getConfig(address _oapp, address _lib, uint32 _eid, uint32 _configType)
+  // — on the ENDPOINT.
   if (sel === SEL.getConfig) {
     const eid = eidOfAddr(data.slice(34, 74));
+    if (!KNOWN_EIDS.has(eid)) return "0x";
+    if (!atEndpointOf(eid)) return "0x";
+    if (parseInt(data.slice(138, 202), 16) !== SRC_EID) return "0x";
+    if (parseInt(data.slice(202, 266), 16) !== 2) return "0x"; // ULN config, not executor
     // A route whose receive LIBRARY was unreadable must never reach wave 2 at
     // all. This destination answers those routes with a perfectly valid ULN for
     // ANY library, so a defaulted or fabricated library — a `null` quietly
@@ -563,8 +616,15 @@ const dstHandler: Handler = (to, data) => {
     if (eidOfAddr(data.slice(98, 138)) !== eid + 0x1000000) return "0x";
     return buildUln(eid % 7);
   }
-  // peers() is called ON the destination peer contract, so `to` names the eid.
-  if (sel === SEL.peers) return "0x" + word(reversePeerFor(eidOfAddr(to)));
+
+  // peers(uint32) — called ON the destination peer contract, so `to` names the
+  // eid, and a call aimed at the endpoint instead must go unanswered.
+  if (sel === SEL.peers) {
+    const eid = eidOfAddr(to);
+    if (!KNOWN_EIDS.has(eid)) return "0x";
+    if (parseInt(data.slice(10, 74), 16) !== SRC_EID) return "0x";
+    return "0x" + word(reversePeerFor(eid));
+  }
   return "0x";
 };
 
@@ -574,12 +634,25 @@ const byEid = (routes: RouteSnapshot[]) =>
   new Map(routes.map((r) => [r.eid, r] as const));
 
 describe("destination-side reads — Multicall3 batching", () => {
-  it("batches destination-side reads through aggregate3, not one call per route", async () => {
+  it("batches destination-side reads through aggregate3, leaving only the delivery leg individual", async () => {
     setChainRegistryChains(dstChains(true, false));
     const log: string[] = [];
+    // Answer outboundNonce so the DELIVERY leg actually fires.
+    //
+    // It is the one destination read that stays individual on purpose: it is
+    // gated on the SOURCE chain's outboundNonce, which the per-route loop has
+    // only just read, so it cannot join a wave built before that loop runs.
+    // The shared fixture answers outboundNonce with "0x", so the leg never ran
+    // at all — which made a plain `expect(dstIndividual).toBe(0)` read as
+    // "every destination read is batched" while only meaning "every destination
+    // read THAT FIRES is batched". Any future fixture that answered
+    // outboundNonce would break it with no batching regression whatsoever, and
+    // the tempting repair would be to weaken the assertion.
+    const srcWithNonce: Handler = (to, data) =>
+      data.slice(0, 10) === NONCE_SEL.outboundNonce ? "0x" + word("5") : srcHandler(to, data);
     const factory = makeFactory(
       {
-        u1: { handler: multicallHandler(srcHandler) },
+        u1: { handler: multicallHandler(srcWithNonce) },
         [DST_A]: { handler: multicallHandler(dstHandler) },
         [DST_B]: { handler: dstHandler },
       },
@@ -593,15 +666,132 @@ describe("destination-side reads — Multicall3 batching", () => {
     );
 
     const dstAgg = log.filter((l) => l.startsWith(`${DST_A}|`) && l.includes(AGG3_SEL)).length;
-    const dstIndividual = log.filter((l) => l.startsWith(`${DST_A}|`) && !l.includes(AGG3_SEL)).length;
+    const dstIndividual = log.filter((l) => l.startsWith(`${DST_A}|`) && !l.includes(AGG3_SEL));
     expect(dstAgg).toBeGreaterThan(0);
-    expect(dstIndividual).toBe(0);
+    // The residue is pinned POSITIVELY: whatever individual destination calls
+    // remain must be the delivery read, and nothing else. A config read
+    // escaping the batch names itself here instead of hiding in a count.
+    expect(dstIndividual.length).toBeGreaterThan(0); // the leg really did fire
+    for (const l of dstIndividual) expect(l).toBe(`${DST_A}|${NONCE_SEL.inboundNonce}`);
 
     // dst-b has no Multicall3, so it must NOT be handed an aggregate3 payload —
     // batching against a contract that isn't deployed reads back as "no data"
     // for every route at once.
     expect(log.filter((l) => l.startsWith(`${DST_B}|`) && l.includes(AGG3_SEL))).toEqual([]);
     expect(log.filter((l) => l.startsWith(`${DST_B}|`)).length).toBeGreaterThan(0);
+  });
+
+  it("sends each route's destination reads to that route's OWN endpoint", async () => {
+    // `endpoint` is stored PER JOB, not per destination-chain bucket. eidMap is
+    // eid-keyed with a per-eid endpoint and several eids share one chainKey, so
+    // a per-bucket endpoint would hand every job the endpoint of whichever
+    // route happened to open the bucket — the second eid silently inheriting
+    // the first's, and its receive config read off the wrong contract.
+    //
+    // Only a fixture where two eids in the SAME bucket have DIFFERENT endpoints
+    // can tell those two forms apart; with one shared ENDPOINT they are
+    // indistinguishable.
+    setChainRegistryChains(dstChains(true, true));
+    const seen: { to: string; data: string }[] = [];
+    const traced: Handler = (to, data) => {
+      seen.push({ to, data });
+      return dstHandler(to, data);
+    };
+
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          {
+            u1: { handler: multicallHandler(srcHandler) },
+            [DST_A]: { handler: multicallHandler(traced) },
+            [DST_B]: { handler: multicallHandler(traced) },
+          },
+          [],
+        ),
+        loadEidMap: splitEidMap,
+      }),
+    );
+
+    // Every endpoint-targeted destination read carries the peer in word 0, so
+    // each observed call names the eid it belongs to.
+    const endpointCalls = seen.filter(
+      (s) => s.data.slice(0, 10) === SEL.getReceiveLibrary || s.data.slice(0, 10) === SEL.getConfig,
+    );
+    expect(endpointCalls.length).toBeGreaterThan(50);
+    for (const { to, data } of endpointCalls) {
+      const eid = eidOfAddr(data.slice(34, 74));
+      expect(to.toLowerCase()).toBe(endpointForEid(eid).toLowerCase());
+    }
+
+    // Non-vacuity: BOTH endpoints really are exercised, and within a SINGLE
+    // bucket — otherwise a per-bucket endpoint would have been correct anyway.
+    const endpointsInA = new Set(
+      endpointCalls
+        .filter(({ data }) => dstKeyFor(eidOfAddr(data.slice(34, 74))) === DST_A)
+        .map(({ to }) => to.toLowerCase()),
+    );
+    expect(endpointsInA.size).toBe(2);
+
+    // …and the reads landed real answers, so the endpoints were not merely
+    // well-formed but the ones the destination would actually serve.
+    for (const r of snap.routes) {
+      if (hasDst(r.eid) && !noRecvLib(r.eid)) {
+        expect(r.receiveUln!.requiredDVNCount).toBe(r.eid % 7);
+      }
+    }
+  });
+
+  it("BOUNDED: the degraded destination path never fans out past FALLBACK_CONCURRENCY", async () => {
+    // "Fallback paths must be bounded, never a bare unbounded Promise.all" is a
+    // stated constraint of this branch — removing unbounded RPC fan-out is the
+    // entire point — and it fires precisely when a destination is DEGRADED,
+    // i.e. when restraint matters most. Swapping batchOnClient's
+    // `mapLimit(calls, FALLBACK_CONCURRENCY, …)` for `Promise.all` is invisible
+    // to a call LOG: the same calls are made, just all at once. Only
+    // simultaneity distinguishes them, so the fake client counts calls IN
+    // FLIGHT rather than calls made.
+    setChainRegistryChains(dstChains(true, true));
+    const inFlight = makeInFlight();
+    // Multicall3 is advertised but aggregate3 fails wholesale, which is exactly
+    // what drops batchOnClient onto its per-call fallback.
+    const noBatch: Handler = (to, data) => {
+      if (data.slice(0, 10) === AGG3_SEL) throw new Error("429 Too Many Requests");
+      return dstHandler(to, data);
+    };
+
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          {
+            u1: { handler: multicallHandler(srcHandler) },
+            [DST_A]: { handler: noBatch },
+            [DST_B]: { handler: noBatch },
+          },
+          [],
+          inFlight,
+        ),
+        loadEidMap: splitEidMap,
+      }),
+    );
+
+    const onA = (u: string) => u === DST_A;
+    // The degrade really happened and really had something to fan out over.
+    expect(inFlight.total(onA)).toBeGreaterThan(50);
+    // The observation mechanism can SEE concurrency — without this a peak of 1
+    // would "pass" under any policy at all, including Promise.all.
+    expect(inFlight.peak(onA)).toBeGreaterThan(1);
+    expect(inFlight.peak(onA)).toBeLessThanOrEqual(FALLBACK_CONCURRENCY);
+
+    // Bounded, but still complete: throttling must not cost a read.
+    for (const r of snap.routes) {
+      if (hasDst(r.eid) && !noRecvLib(r.eid)) {
+        expect(r.receiveUln!.requiredDVNCount).toBe(r.eid % 7);
+      }
+    }
   });
 
   it("builds ONE client per destination chain, not one per route", async () => {

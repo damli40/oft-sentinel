@@ -38,6 +38,17 @@ export const SEL = {
   enforcedOptions: "0x5535d461",
 };
 
+/**
+ * Delivery-accounting selectors. These come from NONCE_ABI in lz-config.ts,
+ * which encodes them through viem rather than from a SEL table — kept separate
+ * so the SEL block above stays a literal mirror of that table.
+ *   outboundNonce(address,uint32,bytes32) / inboundNonce(address,uint32,bytes32)
+ */
+export const NONCE_SEL = {
+  outboundNonce: "0x9c6d7340",
+  inboundNonce: "0xa0dd43fc",
+};
+
 export const word = (hex: string) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
 export const boolWord = (b: boolean) => (b ? "1" : "0").padStart(64, "0");
 export const peersRet = (addr: string) => "0x" + word(addr);
@@ -134,18 +145,92 @@ export const failHandler: Handler = () => "0x";
 
 export interface FakeSpec { handler: Handler; ownerCode?: string }
 
-/** Build an injectable makeClient over a url→spec map, logging every call. */
-export function makeFactory(specs: Record<string, FakeSpec>, log: string[]) {
+/**
+ * Peak-concurrency observer for the BOUNDED fallback paths.
+ *
+ * "Fallback paths must be bounded, never a bare unbounded `Promise.all`" is a
+ * stated constraint of this branch — removing unbounded RPC fan-out is the
+ * whole point — and it applies precisely when a chain is degraded, i.e. when
+ * restraint matters most. Nothing observes it unless a fixture counts calls
+ * that are in flight AT THE SAME TIME, so `mapLimit(…, FALLBACK_CONCURRENCY, …)`
+ * swapped for `Promise.all` reads identically from a call LOG.
+ *
+ * Counts are kept per `${url}|${selector}` so a phase's peak can be read
+ * without the genuinely-unbounded per-route fan-out elsewhere in readSnapshot
+ * polluting it.
+ */
+export interface InFlight {
+  /** Highest simultaneous in-flight count for calls matching the predicate. */
+  peak(match: (url: string, sel: string) => boolean): number;
+  /** Total calls seen matching the predicate — guards against a vacuous peak. */
+  total(match: (url: string, sel: string) => boolean): number;
+}
+
+interface InFlightRec { url: string; sel: string; peak: number; total: number }
+
+export function makeInFlight(): InFlight & { _rec: Map<string, InFlightRec>; _enter(url: string, sel: string): void; _exit(url: string, sel: string): void } {
+  const rec = new Map<string, InFlightRec>();
+  const live = new Map<string, number>();
+  const get = (url: string, sel: string) => {
+    const k = `${url}|${sel}`;
+    let r = rec.get(k);
+    if (!r) { r = { url, sel, peak: 0, total: 0 }; rec.set(k, r); }
+    return r;
+  };
+  const fold = (match: (url: string, sel: string) => boolean, pick: (r: InFlightRec) => number) =>
+    [...rec.values()].filter((r) => match(r.url, r.sel)).reduce((a, r) => a + pick(r), 0);
+  return {
+    _rec: rec,
+    _enter(url, sel) {
+      const k = `${url}|${sel}`;
+      const n = (live.get(k) ?? 0) + 1;
+      live.set(k, n);
+      const r = get(url, sel);
+      r.total += 1;
+      if (n > r.peak) r.peak = n;
+    },
+    _exit(url, sel) {
+      const k = `${url}|${sel}`;
+      live.set(k, (live.get(k) ?? 1) - 1);
+    },
+    // Peak is per key, so the aggregate over a selector set is the MAX of the
+    // per-key peaks — summing them would over-count phases that never overlap.
+    peak(match) {
+      return [...rec.values()].filter((r) => match(r.url, r.sel)).reduce((a, r) => Math.max(a, r.peak), 0);
+    },
+    total(match) { return fold(match, (r) => r.total); },
+  };
+}
+
+/** Build an injectable makeClient over a url→spec map, logging every call.
+ *  `inFlight` (optional) additionally observes simultaneity, which a log cannot. */
+export function makeFactory(specs: Record<string, FakeSpec>, log: string[], inFlight?: ReturnType<typeof makeInFlight>) {
   return (url: string): RpcClient => ({
     async call({ to, data }) {
       log.push(`${url}|${data.slice(0, 10)}`);
       const spec = specs[url];
       if (!spec) throw new Error("no fake for url " + url);
-      const out = spec.handler(to, data);
-      // A revert is an error on the per-call path — viem throws, it does not
-      // hand back the revert payload as if it were return data.
-      if (asRevert(out) !== null) throw new Error("execution reverted");
-      return { data: out };
+      const sel = data.slice(0, 10);
+      if (!inFlight) {
+        const out = spec.handler(to, data);
+        // A revert is an error on the per-call path — viem throws, it does not
+        // hand back the revert payload as if it were return data.
+        if (asRevert(out) !== null) throw new Error("execution reverted");
+        return { data: out };
+      }
+      inFlight._enter(url, sel);
+      try {
+        // Suspend before answering, so genuinely-concurrent callers overlap
+        // here. Without a suspension point each call would run to completion
+        // before the next began and the observed peak would be 1 under ANY
+        // concurrency policy — the fixture would agree with a bare Promise.all.
+        await new Promise((r) => setTimeout(r, 0));
+        const out = spec.handler(to, data);
+        if (asRevert(out) !== null) throw new Error("execution reverted");
+        return { data: out };
+      } finally {
+        inFlight._exit(url, sel);
+      }
     },
     async getBytecode() {
       return specs[url]?.ownerCode ?? "0x";
@@ -320,9 +405,12 @@ export function installHermeticChainRegistry(): void {
   beforeAll(() => {
     regDir = mkdtempSync(join(tmpdir(), "lzreg-"));
     hermeticRegFile = join(regDir, "reg.json");
-    setChainRegistryChains({});
+    // Point the env var at the hermetic file BEFORE writing it. The write path
+    // (setChainRegistryChains) drops the module cache itself, so doing it in the
+    // other order still ended up correct — but only by accident of that reset,
+    // which reads as though the ordering were load-bearing in reverse.
     process.env.CHAIN_REGISTRY_PATH = hermeticRegFile;
-    _resetChainRegistryCache();
+    setChainRegistryChains({});
   });
 
   beforeEach(() => {
@@ -336,6 +424,12 @@ export function installHermeticChainRegistry(): void {
   });
   afterAll(() => {
     rmSync(regDir, { recursive: true, force: true });
+    // Clear the handle along with the directory it named. Left set, it points at
+    // a deleted path, and a stray setChainRegistryChains() after teardown fails
+    // with an ENOENT from writeFileSync instead of the intended
+    // "installHermeticChainRegistry() must run first" — an unrelated-looking
+    // error for exactly the mistake that guard exists to name.
+    hermeticRegFile = null;
     if (savedRegPath === undefined) delete process.env.CHAIN_REGISTRY_PATH;
     else process.env.CHAIN_REGISTRY_PATH = savedRegPath;
     _resetChainRegistryCache();

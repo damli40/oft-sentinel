@@ -4,8 +4,9 @@ import {
   OFT, SEL, AGG3_SEL, fullHandler, makeFactory, multicallHandler,
   chainRef, rpc, deps, installHermeticChainRegistry, type Handler,
   MANY_EIDS, manyEidMap, peerForEid, perEidPeers, errorStringRevert,
-  revertWith, word, buildUln,
+  revertWith, word, buildUln, makeInFlight,
 } from "./helpers/fake-rpc.js";
+import { FALLBACK_CONCURRENCY } from "../services/multicall.js";
 
 installHermeticChainRegistry();
 beforeEach(() => _resetCorridorCache());
@@ -129,6 +130,56 @@ describe("resilientBatch", () => {
     expect(snap.routes[0].uln).not.toBeNull();
     expect(snap.routes[0].hasEnforcedOptions).toBe(false);
     expect(log.filter((l) => l.endsWith(`|${SEL.getSendLibrary}`)).length).toBeGreaterThan(0);
+  });
+
+  it("BOUNDED: the degraded per-call path never fans out past FALLBACK_CONCURRENCY", async () => {
+    // The Global Constraint: "fallback paths must be bounded, never a bare
+    // unbounded Promise.all". Removing unbounded RPC fan-out is what this
+    // branch is FOR, and the constraint binds exactly when the chain is
+    // degraded — a batch has just failed, so the RPC is already unhappy, and
+    // answering by firing all 120 corridor reads at once is the worst possible
+    // response to a rate limit.
+    //
+    // Replacing `mapLimit(calls, FALLBACK_CONCURRENCY, …)` with `Promise.all`
+    // makes the SAME calls in the SAME order, so a call log cannot see it. Only
+    // simultaneity can, so the fake client counts calls in flight.
+    const inFlight = makeInFlight();
+    const { handler } = fullHandler();
+    // Multicall3 advertised, aggregate3 refused → resilientBatch exhausts its
+    // client list and degrades to the bounded per-call path.
+    const noBatch: Handler = (to, data) => {
+      if (data.slice(0, 10) === AGG3_SEL) throw new Error("429 Too Many Requests");
+      return perEidPeers(handler)(to, data);
+    };
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([rpc("u1", "p1")], { multicall3: true }),
+      deps({
+        makeClient: makeFactory({ u1: { handler: noBatch } }, [], inFlight),
+        loadEidMap: manyEidMap,
+      }),
+    );
+
+    // Scoped per selector: readSnapshot has other, deliberately-unbounded
+    // per-route fan-out (the sendability probe), and a global counter would
+    // measure that instead. The corridor sweep is peers(); the send-side waves
+    // are their own selectors. Each is a distinct resilientBatch call list.
+    const sweep = (u: string, s: string) => u === "u1" && s === SEL.peers;
+    const sendSide = (u: string, s: string) =>
+      u === "u1" && [SEL.getSendLibrary, SEL.isDefaultSendLibrary, SEL.enforcedOptions].includes(s);
+
+    // The degrade happened and had a real fan-out to bound: 120 corridors.
+    expect(inFlight.total(sweep)).toBeGreaterThanOrEqual(MANY_EIDS.length);
+    expect(inFlight.total(sendSide)).toBeGreaterThan(100);
+    // The fixture can SEE concurrency — otherwise a peak of 1 would pass under
+    // any policy at all, Promise.all included, and the bound would be vacuous.
+    expect(inFlight.peak(sweep)).toBeGreaterThan(1);
+    expect(inFlight.peak(sweep)).toBeLessThanOrEqual(FALLBACK_CONCURRENCY);
+    expect(inFlight.peak(sendSide)).toBeLessThanOrEqual(FALLBACK_CONCURRENCY);
+
+    // Bounded, but not at the cost of the read.
+    expect(snap.routes.length).toBe(MANY_EIDS.length);
+    expect(snap.routes[0].sendLibrary).not.toBeNull();
   });
 
   it("maps a genuinely reverting sub-call to null without harming its neighbours", async () => {
