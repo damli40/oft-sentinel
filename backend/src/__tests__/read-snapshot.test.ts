@@ -1,139 +1,16 @@
-import { describe, it, expect, beforeEach, afterAll, beforeAll, vi } from "vitest";
-import { writeFileSync, mkdtempSync, rmSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
-import { getAddress, type Address } from "viem";
-import { readSnapshot, _resetCorridorCache, type RpcClient, type ReadSnapshotDeps } from "../services/lz-config.js";
-import { _resetChainRegistryCache } from "../services/chain-registry.js";
-import type { ChainRef } from "../types.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { getAddress } from "viem";
+import { readSnapshot, _resetCorridorCache } from "../services/lz-config.js";
+import {
+  ENDPOINT, OFT, OWNER, SENDLIB, RECVLIB, PEER, ETH_EID,
+  SEL, peersRet, ulnZero, ulnDiff, ZERO_ULN,
+  AGG3_SEL, multicallHandler, MANY_EIDS, manyEidMap, peerForEid, perEidPeers,
+  fullHandler, failHandler, makeFactory, chainRef, deps,
+  installHermeticChainRegistry,
+} from "./helpers/fake-rpc.js";
 
-// ── Fixtures / ABI-shaped canned returns ─────────────────────────────────────
-const ENDPOINT = "0x1a44076050125825900e736c501f859c50fE728c" as Address;
-const OFT = "0x" + "12".repeat(20);
-const OWNER = "0x" + "a1".repeat(20);
-const SENDLIB = "0x" + "5e".repeat(20);
-const RECVLIB = "0x" + "5c".repeat(20);
-const PEER = "0x" + "ab".repeat(20);
-const ETH_EID = 30101;
-const MANTLE_EID = 30181;
+installHermeticChainRegistry();
 
-// 4-byte selectors (must mirror SEL in lz-config.ts).
-const SEL = {
-  getSendLibrary: "0xb96a277f",
-  isDefaultSendLibrary: "0xdc93c8a2",
-  getReceiveLibrary: "0x402f8468",
-  getConfig: "0x2b3197b9",
-  peers: "0xbb0b6a53",
-  owner: "0x8da5cb5b",
-  getThreshold: "0xe75235b8",
-  enforcedOptions: "0x5535d461",
-};
-
-const word = (hex: string) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
-const boolWord = (b: boolean) => (b ? "1" : "0").padStart(64, "0");
-const peersRet = (addr: string) => "0x" + word(addr);
-const addrWord = (addr: string) => "0x" + word(addr);
-const addrBoolRet = (addr: string, b: boolean) => "0x" + word(addr) + boolWord(b);
-const enforcedEmpty = "0x" + "0".repeat(128);
-
-/** UlnConfig-shaped bytes decodable by decodeUlnConfig; requiredDVNCount is the
- *  only field we vary (word index 4 = byte offset 128). */
-function buildUln(requiredDVNCount: number): string {
-  const words = new Array(20).fill("0".repeat(64));
-  words[4] = word(requiredDVNCount.toString(16));
-  return "0x" + words.join("");
-}
-const ulnZero = buildUln(0);
-const ulnDiff = buildUln(1);
-
-const ZERO_ULN = {
-  confirmations: 0,
-  requiredDVNCount: 0,
-  requiredDVNs: [],
-  optionalDVNCount: 0,
-  optionalDVNThreshold: 0,
-  optionalDVNs: [],
-};
-
-type Handler = (to: Address, data: string) => string;
-
-/** A handler that answers every selector with valid data (given a getConfig uln). */
-function fullHandler(uln = ulnZero, ownerCode = "0xabcd"): { handler: Handler; ownerCode: string } {
-  const handler: Handler = (_to, data) => {
-    switch (data.slice(0, 10)) {
-      case SEL.peers: return peersRet(PEER);
-      case SEL.getSendLibrary: return addrWord(SENDLIB);
-      case SEL.isDefaultSendLibrary: return boolWord(false);
-      case SEL.getReceiveLibrary: return addrBoolRet(RECVLIB, false);
-      case SEL.getConfig: return uln;
-      case SEL.enforcedOptions: return enforcedEmpty;
-      case SEL.owner: return addrWord(OWNER);
-      case SEL.getThreshold: return "0x";
-      default: return "0x";
-    }
-  };
-  return { handler, ownerCode };
-}
-const failHandler: Handler = () => "0x"; // every read fails → forces fallback
-
-interface FakeSpec { handler: Handler; ownerCode?: string }
-
-/** Build an injectable makeClient over a url→spec map, logging every call. */
-function makeFactory(specs: Record<string, FakeSpec>, log: string[]) {
-  return (url: string): RpcClient => ({
-    async call({ to, data }) {
-      log.push(`${url}|${data.slice(0, 10)}`);
-      const spec = specs[url];
-      if (!spec) throw new Error("no fake for url " + url);
-      return { data: spec.handler(to, data) };
-    },
-    async getBytecode() {
-      return specs[url]?.ownerCode ?? "0x";
-    },
-    async getStorageAt() {
-      return "0x"; // no proxy admin slot
-    },
-  });
-}
-
-function chainRef(rpcs: { url: string; provider: string }[], over: Partial<ChainRef> = {}): ChainRef {
-  return {
-    chainKey: "mantle",
-    eid: MANTLE_EID,
-    chainId: 5000,
-    eligible: true,
-    etherscanFree: false,
-    multicall3: false,
-    rpcs,
-    ...over,
-  };
-}
-
-const eidMapDep = async () => ({ [ETH_EID]: { chainKey: "ethereum", endpoint: ENDPOINT } });
-const dvnMetaDep = async () => ({ byChain: {}, deadByChain: {}, fetchedAt: Date.now() });
-function deps(extra: Partial<ReadSnapshotDeps>): ReadSnapshotDeps {
-  return { loadEidMap: eidMapDep, loadDvnMeta: dvnMetaDep, ...extra };
-}
-
-// Point the destination-RPC registry lookup at an empty registry so the dest-side
-// receive read is deterministically skipped (receiveUln null) — keeps snapshot
-// fixtures hermetic and independent of the committed chain-registry.json.
-let regDir: string;
-const savedRegPath = process.env.CHAIN_REGISTRY_PATH;
-
-beforeAll(() => {
-  regDir = mkdtempSync(join(tmpdir(), "lzreg-"));
-  const f = join(regDir, "reg.json");
-  writeFileSync(f, JSON.stringify({ generatedAt: "x", source: "test", chains: {} }));
-  process.env.CHAIN_REGISTRY_PATH = f;
-  _resetChainRegistryCache();
-});
-afterAll(() => {
-  rmSync(regDir, { recursive: true, force: true });
-  if (savedRegPath === undefined) delete process.env.CHAIN_REGISTRY_PATH;
-  else process.env.CHAIN_REGISTRY_PATH = savedRegPath;
-  _resetChainRegistryCache();
-});
 beforeEach(() => _resetCorridorCache());
 
 describe("readSnapshot — registry-driven clients", () => {
@@ -254,6 +131,14 @@ describe("readSnapshot — registry-driven clients", () => {
   });
 });
 
+// These two tests do ~1.3-1.9s of real work each (measured identical before and
+// after the batching change), which leaves little headroom under vitest's 5s
+// default once a sibling test file runs in parallel. That combination produced a
+// reproducible timeout, so both get an explicit generous budget. The budget is
+// headroom, not an expectation: if either starts genuinely approaching it, that
+// is a real regression and not a reason to raise the number again.
+const CACHE_TEST_TIMEOUT = 30_000;
+
 describe("readSnapshot — corridor cache", () => {
   it("skips discovery on a cache hit within TTL", async () => {
     const discover = vi.fn(async () => new Map<number, string>([[ETH_EID, peersRet(PEER)]]));
@@ -272,7 +157,7 @@ describe("readSnapshot — corridor cache", () => {
     expect(second.routes).toHaveLength(1);
     // Cache hit → discovery not re-run.
     expect(discover).toHaveBeenCalledTimes(1);
-  });
+  }, CACHE_TEST_TIMEOUT);
 
   it("re-discovers after the corridor TTL expires", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -296,5 +181,93 @@ describe("readSnapshot — corridor cache", () => {
     } finally {
       vi.useRealTimers();
     }
+  }, CACHE_TEST_TIMEOUT);
+});
+
+describe("corridor discovery — Multicall3 batching", () => {
+  it("discovers corridors in batches when multicall3 is available", async () => {
+    const log: string[] = [];
+    const { handler } = fullHandler();
+    const chain = chainRef([{ url: "u1", provider: "p1" }], { multicall3: true });
+    const factory = makeFactory({ u1: { handler: multicallHandler(handler) } }, log);
+
+    await readSnapshot(OFT, chain, deps({ makeClient: factory }));
+
+    const peersCalls = log.filter((l) => l.includes(SEL.peers)).length;
+    const aggCalls = log.filter((l) => l.includes(AGG3_SEL)).length;
+    expect(aggCalls).toBeGreaterThan(0);
+    expect(peersCalls).toBe(0); // every peers() read went through the batch
+  });
+
+  it("EQUIVALENCE: the batched corridor set matches the unbatched one exactly", async () => {
+    const { handler } = fullHandler();
+
+    // Same fixture data, both paths — so any difference is the batching, not the fixture.
+    _resetCorridorCache();
+    const unbatched = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: false }),
+      deps({ makeClient: makeFactory({ u1: { handler } }, []) }),
+    );
+
+    // Cache would make the second read a no-op and prove nothing.
+    _resetCorridorCache();
+    const batched = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({ makeClient: makeFactory({ u1: { handler: multicallHandler(handler) } }, []) }),
+    );
+
+    expect(batched.routes.map((r) => r.eid).sort()).toEqual(
+      unbatched.routes.map((r) => r.eid).sort(),
+    );
+    expect(batched.routes.map((r) => r.peer).sort()).toEqual(
+      unbatched.routes.map((r) => r.peer).sort(),
+    );
+    expect(unbatched.routes.length).toBeGreaterThan(0); // guard against vacuous equality
+  });
+});
+
+describe("corridor discovery — batch ordering and chunking", () => {
+  it("ORDERING: every eid keeps its OWN peer across a multi-chunk batch", async () => {
+    // 120 corridors > MULTICALL_CHUNK_SIZE (50), so this spans 3 chunks. Each eid
+    // resolves to a distinct peer, so any misalignment between a batch result and
+    // its input index lands a neighbour's peer here.
+    const { handler } = fullHandler();
+    const snap = await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          { u1: { handler: multicallHandler(perEidPeers(handler)) } },
+          [],
+        ),
+        loadEidMap: manyEidMap,
+      }),
+    );
+
+    expect(snap.routes.length).toBe(MANY_EIDS.length);
+    for (const r of snap.routes) {
+      expect(r.peerAddress).toBe(peerForEid(r.eid));
+    }
+  });
+
+  it("chunks a large corridor sweep into multiple aggregate3 round-trips", async () => {
+    const log: string[] = [];
+    const { handler } = fullHandler();
+    await readSnapshot(
+      OFT,
+      chainRef([{ url: "u1", provider: "p1" }], { multicall3: true }),
+      deps({
+        makeClient: makeFactory(
+          { u1: { handler: multicallHandler(perEidPeers(handler)) } },
+          log,
+        ),
+        loadEidMap: manyEidMap,
+      }),
+    );
+    const agg = log.filter((l) => l.includes(AGG3_SEL)).length;
+    expect(agg).toBeGreaterThanOrEqual(3); // 120 calls / chunk 50
+    expect(log.filter((l) => l.includes(SEL.peers)).length).toBe(0);
   });
 });

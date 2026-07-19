@@ -5,6 +5,12 @@ import { fileURLToPath } from "url";
 import type { ChainRef, Sendability, OftSnapshot, RouteSnapshot, UlnSnapshot } from "../types.js";
 import { getChainRefByKey, normalizeProvider } from "./chain-registry.js";
 import { getBlockClaimVerification, stampDelivery } from "./block-claim-verifications.js";
+import {
+  aggregate3Batch,
+  mapLimit,
+  FALLBACK_CONCURRENCY,
+  type Call,
+} from "./multicall.js";
 
 // LayerZero V2 endpoint — same address on every EVM chain.
 export const ENDPOINT = "0x1a44076050125825900e736c501f859c50fE728c" as Address;
@@ -834,6 +840,40 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     throw new Error(`all RPCs failed for ${to} on chain ${chain.chainId} (etherscan unavailable)`);
   }
 
+  /**
+   * Batched sibling of resilientCall. One entry per input call, in input order.
+   * `null` == this sub-call yielded no data, and is handled identically to a
+   * thrown resilientCall today.
+   *
+   * Transport failures (429, timeout) kill the WHOLE batch and fall through the
+   * client list, then degrade to per-call resilientCall. They never surface as a
+   * per-call `null` — that distinction is what keeps a rate limit from reading as
+   * a contract revert, which would suppress a CRITICAL (see isRevert's note).
+   */
+  async function resilientBatch(calls: Call[]): Promise<(string | null)[]> {
+    if (calls.length === 0) return [];
+
+    if (chain.multicall3) {
+      for (const client of [srcClient, ...fallbackClients]) {
+        try {
+          return await aggregate3Batch(
+            (to, data) => rawCall(client, to, data),
+            calls,
+          );
+        } catch {
+          // Transport-level failure for this client — try the next one.
+        }
+      }
+    }
+
+    // No Multicall3, or every client failed the batch. Per-call path, which
+    // carries its own retry/fallback/etherscan chain — bounded, so a failing
+    // batch cannot reintroduce the unbounded fan-out this change removes.
+    return mapLimit(calls, FALLBACK_CONCURRENCY, (c) =>
+      resilientCall(c.target, c.callData).catch(() => null),
+    );
+  }
+
   const [dvnMeta, eidMap] = await Promise.all([dvnMetaLoader(), eidMapLoader()]);
 
   // The source chain's chainKey — used for DVN name resolution of send-side
@@ -847,11 +887,11 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   // Falls back to sweeping ALL known V2 EVM EIDs when Etherscan is unavailable
   // for this chain, errors, or returns nothing — a missed corridor would blind
   // the monitor, so omission always degrades to the exhaustive path, never to
-  // silence. Batched to 25 concurrent calls to avoid RPC rate-limiting.
-  // Skipped entirely on a corridor-cache hit (see CORRIDOR_TTL_MS).
+  // silence. Read through resilientBatch: one Multicall3 round-trip per
+  // MULTICALL_CHUNK_SIZE where the chain supports it, otherwise a bounded
+  // per-call sweep. Skipped entirely on a corridor-cache hit (see CORRIDOR_TTL_MS).
   const activeEids: number[] = [];
   const peerAddresses: Record<number, string> = {};
-  const EID_BATCH = 25;
 
   const cacheKey = `${chain.chainId}:${oftAddr}`;
   const cached = corridorCache.get(cacheKey);
@@ -868,20 +908,19 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     if (discovered?.size) {
       console.log(`[lz-config] ${oft}: ${allEids.length} candidate corridors via PeerSet logs (skipping full sweep)`);
     }
-    for (let i = 0; i < allEids.length; i += EID_BATCH) {
-      await Promise.all(
-        allEids.slice(i, i + EID_BATCH).map(async (eid) => {
-          try {
-            const r = await resilientCall(oftAddr, SEL.peers + padU32(eid));
-            if (r && r !== "0x" && BigInt(r) !== 0n) {
-              activeEids.push(eid);
-              // peers() returns bytes32 — last 20 bytes are the peer OFT address
-              peerAddresses[eid] = getAddress("0x" + r.slice(-40));
-            }
-          } catch { /* no peer for this eid */ }
-        })
-      );
-    }
+    const peerCalls: Call[] = allEids.map((eid) => ({
+      target: oftAddr,
+      callData: SEL.peers + padU32(eid),
+    }));
+    const peerResults = await resilientBatch(peerCalls);
+    allEids.forEach((eid, i) => {
+      const r = peerResults[i];
+      if (r && r !== "0x" && BigInt(r) !== 0n) {
+        activeEids.push(eid);
+        // peers() returns bytes32 — last 20 bytes are the peer OFT address
+        peerAddresses[eid] = getAddress("0x" + r.slice(-40));
+      }
+    });
     corridorCache.set(cacheKey, { at: Date.now(), eids: [...activeEids], peers: { ...peerAddresses } });
   }
 
