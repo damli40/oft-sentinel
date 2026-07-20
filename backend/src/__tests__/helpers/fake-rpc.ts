@@ -36,6 +36,7 @@ export const SEL = {
   owner: "0x8da5cb5b",
   getThreshold: "0xe75235b8",
   enforcedOptions: "0x5535d461",
+  decimals: "0x313ce567",
 };
 
 /**
@@ -240,6 +241,22 @@ export function fullHandler(
         if (!isRouteEid(argU(10))) return "0x";
         if (argU(74) !== 1) return "0x";
         return enforcedEmpty;
+
+      // decimals() — on the OFT. Read once per OFT for the quoteSend probe
+      // amount (see lz-config.ts's `probeAmount`). Unmodelled until 2026-07-20:
+      // resilientCall's paced retry made that "0x" default (a silent, free
+      // no-op before pacing existed) cost a real 150ms sleep on what should be
+      // an all-succeeding fixture — exactly the kind of previously-invisible
+      // cost this task exists to surface.
+      //
+      // 6, not 18: lz-config.ts's catch-block default IS 18, so answering 18
+      // here made the success and failure branches indistinguishable — every
+      // fullHandler test incidentally exercised "keep the default" and none
+      // exercised "read the real value". 6 (USDC's decimals) is a real,
+      // common on-chain value that makes the two branches actually diverge.
+      case SEL.decimals:
+        if (!at(oft)) return "0x";
+        return "0x" + word("6");
 
       // Nullary, and called on more than one target (the OFT, and a ProxyAdmin's
       // owner) — nothing to pin beyond the selector.
@@ -480,8 +497,17 @@ export function perEidPeers(
 export const MALFORMED_PEER = "0xZZZZ";
 export const dvnMetaDep = async () => ({ byChain: {}, deadByChain: {}, fetchedAt: Date.now() });
 
+/**
+ * `sleep` defaults to a no-op. Without this, every test file that builds deps()
+ * here but doesn't care about pacing falls through to readSnapshot's production
+ * `setTimeout` + `Math.random` jitter default and pays real wall-clock time on
+ * every simulated RPC failure — nondeterministic run to run, and on a fixture
+ * with enough failures (e.g. read-snapshot.test.ts's 120-corridor sweep) enough
+ * of it to threaten vitest's default timeout. `extra` spreads AFTER, so
+ * rpc-pacing.test.ts's own sleep spy still wins.
+ */
 export function deps(extra: Partial<ReadSnapshotDeps>): ReadSnapshotDeps {
-  return { loadEidMap: eidMapDep, loadDvnMeta: dvnMetaDep, ...extra };
+  return { loadEidMap: eidMapDep, loadDvnMeta: dvnMetaDep, sleep: async () => {}, ...extra };
 }
 
 /**
