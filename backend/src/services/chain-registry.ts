@@ -9,7 +9,6 @@ import type { ChainRef, ChainRpc } from "../types.js";
 // and NOT under DATA_DIR. A missing or malformed file is a build error: fail
 // loudly at first read rather than silently monitoring nothing.
 const REGISTRY_BASENAME = "chain-registry.json";
-const MANTLE_CHAIN_ID = 5000;
 
 interface RawRegistry {
   generatedAt?: string;
@@ -49,19 +48,6 @@ export function registryFile(): string {
 // Cached per process. Keyed by the resolved file path so a test that swaps
 // CHAIN_REGISTRY_PATH gets a fresh load instead of a stale cache.
 let cache: { path: string; byChainId: Map<number, ChainRef>; byKey: Map<string, ChainRef> } | null = null;
-
-/** Apply the MANTLE_RPC env override: if set and this is the Mantle entry,
- *  promote that URL to rpcs[0] (dedup by URL) for backward compat with existing
- *  single-chain deployments. Never mutates the source object. */
-function applyMantleRpcOverride(ref: ChainRef): ChainRef {
-  const override = process.env.MANTLE_RPC;
-  if (!override || ref.chainId !== MANTLE_CHAIN_ID) return ref;
-  const rest = ref.rpcs.filter((r) => r.url !== override);
-  const promoted: ChainRpc = { url: override, provider: "official" };
-  // Preserve the provider label if the override URL already exists in the set.
-  const existing = ref.rpcs.find((r) => r.url === override);
-  return { ...ref, rpcs: [existing ?? promoted, ...rest] };
-}
 
 /** Keyed-endpoint overrides. When an env key is set, prepend that provider's
  *  keyed endpoint for the networks the key has been verified against — keyed
@@ -140,7 +126,7 @@ function load(): { byChainId: Map<number, ChainRef>; byKey: Map<string, ChainRef
     // artifact, so coerce strictly — absent/stale/non-boolean must degrade to
     // false (individual calls), never to true (batching against no contract).
     const multicall3 = (entry as { multicall3?: unknown }).multicall3 === true;
-    const ref = applyMantleRpcOverride({ ...withKeyed, eligible, multicall3 });
+    const ref = { ...withKeyed, eligible, multicall3 };
     byChainId.set(ref.chainId, ref);
     byKey.set(ref.chainKey, ref);
   }
