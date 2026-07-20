@@ -118,23 +118,43 @@ describe("registry lookups", () => {
   });
 });
 
-describe("MANTLE_RPC override", () => {
-  it("promotes MANTLE_RPC to rpcs[0] for chainId 5000 and dedups", () => {
+describe("MANTLE_RPC has no effect on the read path", () => {
+  // The MANTLE_RPC read-path override was deleted 2026-07-20. It was a
+  // backward-compat shim for single-chain deployments that no longer exist,
+  // and it demoted the keyed Alchemy endpoint to a fallback on the one chain
+  // whose primary was an unkeyed public endpoint. MANTLE_RPC still belongs to
+  // the hardhat deploy config under contracts/, which is why the variable
+  // lives on — these tests pin that the BACKEND read path ignores it.
+
+  it("keeps the keyed providers at the front on mantle even when MANTLE_RPC is set", () => {
+    process.env.ALCHEMY_API_KEY = "akey";
+    process.env.DRPC_API_KEY = "dkey";
     process.env.MANTLE_RPC = "https://custom-mantle.example/rpc";
     writeRegistry({ mantle: twoProviderChain });
     const ref = getChainRef(5000)!;
-    expect(ref.rpcs[0].url).toBe("https://custom-mantle.example/rpc");
-    // Original URLs still present, no duplicate.
-    expect(ref.rpcs.filter((r) => r.url === "https://custom-mantle.example/rpc").length).toBe(1);
-    expect(ref.rpcs.some((r) => r.url === "https://rpc.mantle.xyz")).toBe(true);
+    // Alchemy primary, keyed dRPC as the distinct-provider cross-check peer.
+    expect(ref.rpcs[0].url).toBe("https://mantle-mainnet.g.alchemy.com/v2/akey");
+    expect(ref.rpcs[1].url).toBe("https://lb.drpc.live/mantle/dkey");
+    expect(ref.rpcs.some((r) => r.url === "https://custom-mantle.example/rpc")).toBe(false);
   });
 
-  it("does not reorder when MANTLE_RPC already matches rpcs[0]", () => {
-    process.env.MANTLE_RPC = "https://rpc.mantle.xyz";
+  // Kills a "soft" reintroduction of the override that only applies when no
+  // keyed providers are configured: with no keys set, registry order must
+  // still govern completely.
+  it("leaves registry order untouched on mantle when MANTLE_RPC is set and no keys are", () => {
+    process.env.MANTLE_RPC = "https://custom-mantle.example/rpc";
     writeRegistry({ mantle: twoProviderChain });
     const ref = getChainRef(5000)!;
-    expect(ref.rpcs[0].url).toBe("https://rpc.mantle.xyz");
-    expect(ref.rpcs.length).toBe(2);
+    expect(ref.rpcs.map((r) => r.url)).toEqual([
+      "https://rpc.mantle.xyz",
+      "https://mantle.drpc.org",
+    ]);
+  });
+
+  it("still meets quorum and stays eligible on mantle", () => {
+    process.env.MANTLE_RPC = "https://custom-mantle.example/rpc";
+    writeRegistry({ mantle: twoProviderChain });
+    expect(getChainRef(5000)!.eligible).toBe(true);
   });
 });
 
@@ -189,15 +209,6 @@ describe("keyed provider overrides (ALCHEMY_API_KEY / DRPC_API_KEY)", () => {
     const ref = getChainRef(1)!;
     expect(ref.rpcs.length).toBe(2);
     expect(ref.rpcs[0].provider).toBe("meowrpc");
-  });
-
-  it("MANTLE_RPC still wins rpcs[0] on mantle when keys are also set", () => {
-    process.env.ALCHEMY_API_KEY = "akey";
-    process.env.MANTLE_RPC = "https://custom-mantle.example/rpc";
-    writeRegistry({ mantle: twoProviderChain });
-    const ref = getChainRef(5000)!;
-    expect(ref.rpcs[0].url).toBe("https://custom-mantle.example/rpc");
-    expect(ref.rpcs.some((r) => r.url === "https://mantle-mainnet.g.alchemy.com/v2/akey")).toBe(true);
   });
 
   it("does not duplicate a keyed URL already present in the registry file", () => {

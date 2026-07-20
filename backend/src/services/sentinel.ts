@@ -185,9 +185,10 @@ export async function pollOnce(): Promise<void> {
     console.log(`[sentinel] polling ${watched.length} OFTs across ${chainCount} chain(s)`);
     await mapLimit(watched.filter((w) => w.ticker !== "DEMO"), POLL_CONCURRENCY, async (w) => {
       try {
-        // Resolve the OFT's source chain from the registry (MANTLE_RPC override
-        // is applied inside getChainRef). An unknown or ineligible chain is
-        // logged and skipped — never crash the poller over one asset's config.
+        // Resolve the OFT's source chain from the registry (keyed-provider
+        // ordering is applied inside getChainRef). An unknown or ineligible
+        // chain is logged and skipped — never crash the poller over one
+        // asset's config.
         const chainRef = getChainRef(w.chainId);
         if (!chainRef || !chainRef.eligible) {
           console.warn(`[sentinel] ${w.ticker}: chain ${w.chainId} not in registry or ineligible — skipping`);
