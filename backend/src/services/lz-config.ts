@@ -793,17 +793,35 @@ export interface ReadSnapshotDeps {
 //
 // 0 is a legitimate value (pacing off), so this does NOT reuse multicall.ts's
 // parsePositiveInt, which rejects 0.
-function parseNonNegativeInt(name: string, raw: string | undefined, fallback: number): number {
+//
+// `max` mirrors parsePositiveInt's: REJECT, never clamp. A silently-substituted
+// value is a config nobody chose, same as multicall.ts's MULTICALL_CHUNK_SIZE.
+function parseNonNegativeInt(name: string, raw: string | undefined, fallback: number, max?: number): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0) {
     throw new Error(`${name} must be a non-negative integer, got ${JSON.stringify(raw)}`);
   }
+  if (max !== undefined && n > max) {
+    throw new Error(`${name} must be <= ${max}, got ${JSON.stringify(raw)}`);
+  }
   return n;
 }
 
-const RPC_RETRY_DELAY_MS = parseNonNegativeInt("RPC_RETRY_DELAY_MS", process.env.RPC_RETRY_DELAY_MS, 150);
-const RPC_FALLBACK_DELAY_MS = parseNonNegativeInt("RPC_FALLBACK_DELAY_MS", process.env.RPC_FALLBACK_DELAY_MS, 100);
+// Ceiling for both pacing knobs. RPC_RETRY_DELAY_MS=150000 (a plausible
+// seconds/milliseconds typo) stalls every failed read 75-225s (jitter is
+// 0.5x-1.5x of base) — with a full fleet sweep normally ~20 min against an
+// hourly cadence (see sentinel.ts's DEFAULT_POLL_INTERVAL_MS), that magnitude
+// of per-hop stall pushes the sweep past its window and configs land unread,
+// which is a live CRITICAL going unreported for as long as it stands. 10s is
+// two orders of magnitude above either default (150ms / 100ms) — far more
+// headroom than any real pacing tune needs — while staying small enough that
+// even a primary retry plus several fallback hops on one degraded corridor
+// costs low tens of seconds, not minutes.
+export const RPC_DELAY_MAX_MS = 10_000;
+
+export const RPC_RETRY_DELAY_MS = parseNonNegativeInt("RPC_RETRY_DELAY_MS", process.env.RPC_RETRY_DELAY_MS, 150, RPC_DELAY_MAX_MS);
+export const RPC_FALLBACK_DELAY_MS = parseNonNegativeInt("RPC_FALLBACK_DELAY_MS", process.env.RPC_FALLBACK_DELAY_MS, 100, RPC_DELAY_MAX_MS);
 
 // ── Snapshot reader ───────────────────────────────────────────────────────────
 
