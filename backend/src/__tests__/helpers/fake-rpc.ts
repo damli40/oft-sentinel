@@ -36,6 +36,7 @@ export const SEL = {
   owner: "0x8da5cb5b",
   getThreshold: "0xe75235b8",
   enforcedOptions: "0x5535d461",
+  decimals: "0x313ce567",
 };
 
 /**
@@ -240,6 +241,16 @@ export function fullHandler(
         if (!isRouteEid(argU(10))) return "0x";
         if (argU(74) !== 1) return "0x";
         return enforcedEmpty;
+
+      // decimals() — on the OFT. Read once per OFT for the quoteSend probe
+      // amount (see lz-config.ts's `probeAmount`). Unmodelled until 2026-07-20:
+      // resilientCall's paced retry made that "0x" default (a silent, free
+      // no-op before pacing existed) cost a real 150ms sleep on what should be
+      // an all-succeeding fixture — exactly the kind of previously-invisible
+      // cost this task exists to surface. 18 decimals is the common case.
+      case SEL.decimals:
+        if (!at(oft)) return "0x";
+        return "0x" + word("12");
 
       // Nullary, and called on more than one target (the OFT, and a ProxyAdmin's
       // owner) — nothing to pin beyond the selector.

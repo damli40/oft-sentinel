@@ -775,7 +775,35 @@ export interface ReadSnapshotDeps {
   discoverPeers?: (chainId: number, oft: Address) => Promise<Map<number, string> | null>;
   loadEidMap?: typeof loadEidMap;
   loadDvnMeta?: typeof loadDvnMeta;
+  /** Injectable so tests assert the pacing WITHOUT waiting for it. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable randomness for jitter; production uses Math.random. */
+  jitter?: () => number;
 }
+
+// ── RPC retry pacing ─────────────────────────────────────────────────────────
+// A throttled primary used to convert itself into a storm against the fallback
+// provider: resilientCall retried the primary with NO delay (still throttled),
+// then walked every fallback at full speed. Measured 2026-07-19 — dRPC
+// RPS-limited 62% of the day's requests while serving only cross-checks and
+// fallbacks, i.e. one provider's rate limit became another's.
+//
+// Pacing applies ONLY after a failure. A read that succeeds first try sleeps
+// zero times; the healthy fleet pays nothing for this.
+//
+// 0 is a legitimate value (pacing off), so this does NOT reuse multicall.ts's
+// parsePositiveInt, which rejects 0.
+function parseNonNegativeInt(name: string, raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name} must be a non-negative integer, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
+
+const RPC_RETRY_DELAY_MS = parseNonNegativeInt("RPC_RETRY_DELAY_MS", process.env.RPC_RETRY_DELAY_MS, 150);
+const RPC_FALLBACK_DELAY_MS = parseNonNegativeInt("RPC_FALLBACK_DELAY_MS", process.env.RPC_FALLBACK_DELAY_MS, 100);
 
 // ── Snapshot reader ───────────────────────────────────────────────────────────
 
@@ -797,6 +825,12 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   const discoverPeers = deps.discoverPeers ?? discoverPeersViaEtherscan;
   const eidMapLoader = deps.loadEidMap ?? loadEidMap;
   const dvnMetaLoader = deps.loadDvnMeta ?? loadDvnMeta;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const jitter = deps.jitter ?? Math.random;
+  // Jitter spreads retries that would otherwise re-collide in lockstep: ~174 assets
+  // sweep concurrently, so an un-jittered fixed delay just reschedules the same
+  // thundering herd one interval later.
+  const backoff = (base: number) => (base > 0 ? sleep(Math.round(base * (0.5 + jitter()))) : Promise.resolve());
 
   const srcClient = makeClient(chain.rpcs[0].url);
   // Quorum/fallback clients from the registry (replaces the Mantle-only set).
@@ -825,11 +859,13 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   async function resilientCall(to: Address, data: string): Promise<string> {
     try {
       return await strictCall(srcClient, to, data);
-    } catch { /* retry primary once */ }
+    } catch { /* paced retry below */ }
+    await backoff(RPC_RETRY_DELAY_MS);
     try {
       return await strictCall(srcClient, to, data);
     } catch { /* fall through to fallbacks */ }
     for (const fb of fallbackClients) {
+      await backoff(RPC_FALLBACK_DELAY_MS);
       try {
         return await strictCall(fb, to, data);
       } catch { /* next fallback */ }
@@ -864,7 +900,10 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
 
     if (chain.multicall3) {
       let lastErr: unknown;
+      let firstClient = true;
       for (const client of [srcClient, ...fallbackClients]) {
+        if (!firstClient) await backoff(RPC_FALLBACK_DELAY_MS);
+        firstClient = false;
         try {
           return await aggregate3Batch(
             (to, data) => rawCall(client, to, data),
