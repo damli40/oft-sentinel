@@ -1158,37 +1158,60 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     if (raw) { try { route.uln = decodeUlnConfig(raw); } catch { /* null */ } }
   });
 
+  // ── RPC source-conflict cross-check (batched) ──────────────────────────────
+  // Cross-check every send-side ULN against a secondary, DIFFERENT-provider RPC.
+  // Disagreement on requiredDVNs / counts / optionalDVNThreshold flags the route
+  // as potentially manipulated — surfaced as CRITICAL in assessSnapshot.
+  //
+  // Batched via batchOnClient, which issues against ONE named client. That is the
+  // distinction the previous comment here missed: batching per se is not what
+  // would break this check — batching through resilientBatch would, because that
+  // reads from the PRIMARY and the primary would corroborate itself. Pointing a
+  // batch at secondaryClient preserves provider independence exactly.
+  //
+  // ~870 unbatched calls per fleet cycle became ~20. That volume was a measured
+  // contributor to the secondary provider's RPS throttling (2026-07-19).
+  const xcheckRoutes = secondaryClient
+    ? routeList.filter((r) => r.sendLibrary && r.uln)
+    : [];
+  const xcheckResults = xcheckRoutes.length
+    ? await batchOnClient(
+        secondaryClient!,
+        chain.multicall3,
+        chain.chainKey,
+        xcheckRoutes.map((r) => ({
+          target: ENDPOINT,
+          callData: SEL.getConfig + padAddr(oftAddr) + padAddr(r.sendLibrary!) + padU32(r.eid) + padU32(2),
+        })),
+      )
+    : [];
+  // eid → raw secondary result. null/absent == NOT ASKED, never "no conflict".
+  const xcheckByEid = new Map<number, string | null>();
+  xcheckRoutes.forEach((r, i) => xcheckByEid.set(r.eid, xcheckResults[i] ?? null));
+
   await Promise.all(
     routeList.map(async (route) => {
       const eid = route.eid;
       const chainInfo = eidMap[eid];
 
       // ── RPC source-conflict check ────────────────────────────────────────
-      // Cross-check the send-side ULN against a secondary, DIFFERENT-provider RPC.
-      // Disagreement on requiredDVNs / counts / optionalDVNThreshold flags the route
-      // as potentially manipulated — surfaced as CRITICAL in assessSnapshot.
-      //
-      // This one stays on the individual path deliberately. resilientBatch reads
-      // from the primary client (falling through the client list only on transport
-      // failure), so batching this call would have the primary corroborate itself:
-      // the check would still run, still pass, and never detect a conflict again.
-      // The whole point is that a SECOND provider answers it.
-      if (route.sendLibrary && route.uln && secondaryClient) {
-        try {
-          const fbUln = decodeUlnConfig(
-            await rawCall(secondaryClient, ENDPOINT, SEL.getConfig + padAddr(oftAddr) + padAddr(route.sendLibrary) + padU32(eid) + padU32(2))
-          );
-          if (fbUln) {
-            const sameCount = fbUln.requiredDVNCount === route.uln.requiredDVNCount;
-            const sameThreshold = fbUln.optionalDVNThreshold === route.uln.optionalDVNThreshold;
-            const sameDvns = fbUln.requiredDVNs.length === route.uln.requiredDVNs.length &&
-              fbUln.requiredDVNs.every((a, i) => a.toLowerCase() === route.uln!.requiredDVNs[i]?.toLowerCase());
-            if (!sameCount || !sameThreshold || !sameDvns) {
-              route.rpcConflict = true;
-              console.warn(`[lz-config] RPC conflict ${oft} eid=${eid}: primary=${JSON.stringify(route.uln.requiredDVNs)}, secondary=${JSON.stringify(fbUln.requiredDVNs)}`);
-            }
+      // Consume the batched cross-check result computed above.
+      const xcheckRaw = xcheckByEid.get(eid);
+      if (xcheckRaw) {
+        // A throw here would abort the whole route; decode defensively and treat
+        // any failure as "not asked", identical to the old catch-and-skip.
+        let fbUln: ReturnType<typeof decodeUlnConfig> = null;
+        try { fbUln = decodeUlnConfig(xcheckRaw); } catch { fbUln = null; }
+        if (fbUln && route.uln) {
+          const sameCount = fbUln.requiredDVNCount === route.uln.requiredDVNCount;
+          const sameThreshold = fbUln.optionalDVNThreshold === route.uln.optionalDVNThreshold;
+          const sameDvns = fbUln.requiredDVNs.length === route.uln.requiredDVNs.length &&
+            fbUln.requiredDVNs.every((a, i) => a.toLowerCase() === route.uln!.requiredDVNs[i]?.toLowerCase());
+          if (!sameCount || !sameThreshold || !sameDvns) {
+            route.rpcConflict = true;
+            console.warn(`[lz-config] RPC conflict ${oft} eid=${eid}: primary=${JSON.stringify(route.uln.requiredDVNs)}, secondary=${JSON.stringify(fbUln.requiredDVNs)}`);
           }
-        } catch { /* secondary unavailable — skip check */ }
+        }
       }
 
       // The destination chain's RPC and its own endpoint address (varies by

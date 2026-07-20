@@ -518,11 +518,12 @@ describe("send-side ULN — Multicall3 batching", () => {
     expect(log.filter((l) => l.includes(AGG3_SEL)).length).toBeGreaterThan(0);
   });
 
-  it("keeps the rpcConflict cross-check on the individual path, against the OTHER provider", async () => {
+  it("batches the rpcConflict cross-check onto the SECOND provider, never the primary", async () => {
     // The cross-check exists to have a SECOND provider corroborate the primary's
-    // ULN. Routed through resilientBatch it would go back to the primary client
-    // and agree with itself by construction — the check would still "run", still
-    // pass, and never flag a manipulated read again.
+    // ULN. It is batched via batchOnClient POINTED AT secondaryClient — never
+    // through resilientBatch, which reads from the primary and would have it
+    // corroborate itself, silently and permanently losing the check's ability
+    // to detect a conflict.
     const log: string[] = [];
     const snap = await readSnapshot(
       OFT,
@@ -541,8 +542,8 @@ describe("send-side ULN — Multicall3 batching", () => {
       }),
     );
     expect(snap.routes[0].rpcConflict).toBe(true);
-    // …and it went out as a bare getConfig on p1, never as a batch.
-    expect(log).toContain(`p1|${SEL.getConfig}`);
+    // …and it went out as an aggregate3 BATCH on p1, never a bare per-call read.
+    expect(log).toContain(`p1|${AGG3_SEL}`);
   });
 });
 
