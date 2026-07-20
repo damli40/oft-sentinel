@@ -808,16 +808,27 @@ function parseNonNegativeInt(name: string, raw: string | undefined, fallback: nu
   return n;
 }
 
-// Ceiling for both pacing knobs. RPC_RETRY_DELAY_MS=150000 (a plausible
-// seconds/milliseconds typo) stalls every failed read 75-225s (jitter is
-// 0.5x-1.5x of base) — with a full fleet sweep normally ~20 min against an
-// hourly cadence (see sentinel.ts's DEFAULT_POLL_INTERVAL_MS), that magnitude
-// of per-hop stall pushes the sweep past its window and configs land unread,
-// which is a live CRITICAL going unreported for as long as it stands. 10s is
-// two orders of magnitude above either default (150ms / 100ms) — far more
-// headroom than any real pacing tune needs — while staying small enough that
-// even a primary retry plus several fallback hops on one degraded corridor
-// costs low tens of seconds, not minutes.
+// Ceiling for both pacing knobs — a REJECT bound (see parseNonNegativeInt
+// above), not a recommendation. RPC_RETRY_DELAY_MS=150000 (a plausible
+// seconds/milliseconds typo) stalls a single hop 75-225s (jitter is
+// 0.5x-1.5x of base), which is already well past what this cap exists to
+// catch.
+//
+// Pacing is per CALL, not per hop or per corridor. resilientBatch's degrade
+// path (the multicall3-failed branch, and batchOnClient's cross-check
+// sibling) fans calls out at FALLBACK_CONCURRENCY=4 via mapLimit, and EACH of
+// those calls independently pays its own resilientCall retry-then-fallback
+// walk. A degraded 120-corridor read on a 3-RPC chain is ~30 waves of 4
+// concurrent calls, each call worst-casing at (1 retry + 2 fallback hops). At
+// the 10s cap that's 30s of pure sleep per call — ~900s (15 minutes) for ONE
+// wave of ONE OFT, against an hourly cadence and a fleet sweep the code's own
+// comments put at ~20 min (see sentinel.ts's DEFAULT_POLL_INTERVAL_MS). Even a
+// mild-looking tune to 2000ms costs ~180s per wave per OFT. So 10s is two
+// orders of magnitude above either default (150ms / 100ms) and rejects
+// anything past it, but it is NOT "headroom any real pacing tune needs" —
+// an operator choosing a value anywhere near this cap is choosing to drop
+// configs unread, not to be cautious. Tune close to the defaults; treat this
+// ceiling as a blunder-catcher, not a target.
 export const RPC_DELAY_MAX_MS = 10_000;
 
 export const RPC_RETRY_DELAY_MS = parseNonNegativeInt("RPC_RETRY_DELAY_MS", process.env.RPC_RETRY_DELAY_MS, 150, RPC_DELAY_MAX_MS);
@@ -845,9 +856,13 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   const dvnMetaLoader = deps.loadDvnMeta ?? loadDvnMeta;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const jitter = deps.jitter ?? Math.random;
-  // Jitter spreads retries that would otherwise re-collide in lockstep: ~174 assets
-  // sweep concurrently, so an un-jittered fixed delay just reschedules the same
-  // thundering herd one interval later.
+  // Jitter spreads retries that would otherwise re-collide in lockstep. Not
+  // ~174 assets concurrently — sentinel.ts's POLL_CONCURRENCY caps that at 3
+  // OFTs in flight at once — but each OFT's own sweep still fans many corridor
+  // calls out concurrently (FALLBACK_CONCURRENCY, resilientBatch's degrade
+  // path), and a retry re-collides with the same peers on the same client
+  // every subsequent hourly cycle regardless. An un-jittered fixed delay just
+  // reschedules that thundering herd one interval later.
   const backoff = (base: number) => (base > 0 ? sleep(Math.round(base * (0.5 + jitter()))) : Promise.resolve());
 
   const srcClient = makeClient(chain.rpcs[0].url);
@@ -951,9 +966,13 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   }
 
   /**
-   * Batch against an ARBITRARY client — the destination-side sibling of
-   * resilientBatch, which closes over the SOURCE chain's client list and so
-   * cannot be pointed at another chain.
+   * Batch against an ARBITRARY client — originally the destination-side
+   * sibling of resilientBatch, which closes over the SOURCE chain's client
+   * list and so cannot be pointed at another chain. It now ALSO serves the
+   * RPC-conflict cross-check above, which points it at secondaryClient (the
+   * source chain's own second provider) rather than a destination chain — so
+   * `chainKey` alone no longer says which side of the read collapsed; see the
+   * `label` param below.
    *
    * Destination reads use a bare rawCall today with no retry and no fallback
    * chain, so on any failure this degrades to exactly that: one rawCall per
@@ -966,6 +985,11 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
     client: RpcClient,
     hasMulticall: boolean,
     chainKey: string,
+    /** Distinguishes this call site in the warn below — "dst" for a
+     *  destination-chain batch, "src-xcheck" for the source-side cross-check.
+     *  Without it every collapse logs as "dst", which misdirects triage on a
+     *  source-side failure straight past the actual cause. */
+    label: string,
     calls: Call[],
   ): Promise<(string | null)[]> {
     if (calls.length === 0) return [];
@@ -976,7 +1000,7 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
         // Transport-level failure for the whole batch — fall through to
         // per-call. Same observability rationale as resilientBatch's warn.
         console.warn(
-          `[lz-config] multicall batch failed on dst ${chainKey} (${calls.length} calls), falling back to per-call: ${e instanceof Error ? e.message : String(e)}`,
+          `[lz-config] multicall batch failed on ${label} ${chainKey} (${calls.length} calls), falling back to per-call: ${e instanceof Error ? e.message : String(e)}`,
         );
       }
     }
@@ -1174,17 +1198,26 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
   const xcheckRoutes = secondaryClient
     ? routeList.filter((r) => r.sendLibrary && r.uln)
     : [];
-  const xcheckResults = xcheckRoutes.length
-    ? await batchOnClient(
-        secondaryClient!,
-        chain.multicall3,
-        chain.chainKey,
-        xcheckRoutes.map((r) => ({
-          target: ENDPOINT,
-          callData: SEL.getConfig + padAddr(oftAddr) + padAddr(r.sendLibrary!) + padU32(r.eid) + padU32(2),
-        })),
-      )
-    : [];
+  // Defensive: the filter above makes this unreachable today (every entry has
+  // a decoded sendLibrary and uln), but padAddr/calldata construction is not
+  // provably total, and it runs OUTSIDE batchOnClient's own try/catch. A throw
+  // here must cost the cross-check, not the whole snapshot — same "one bad
+  // route can't take down the read" rule as everywhere else in this function.
+  let xcheckResults: (string | null)[] = [];
+  try {
+    xcheckResults = xcheckRoutes.length
+      ? await batchOnClient(
+          secondaryClient!,
+          chain.multicall3,
+          chain.chainKey,
+          "src-xcheck",
+          xcheckRoutes.map((r) => ({
+            target: ENDPOINT,
+            callData: SEL.getConfig + padAddr(oftAddr) + padAddr(r.sendLibrary!) + padU32(r.eid) + padU32(2),
+          })),
+        )
+      : [];
+  } catch { /* treat as NOT ASKED — same invariant as a skipped cross-check */ }
   // eid → raw secondary result. null/absent == NOT ASKED, never "no conflict".
   const xcheckByEid = new Map<number, string | null>();
   xcheckRoutes.forEach((r, i) => xcheckByEid.set(r.eid, xcheckResults[i] ?? null));
@@ -1319,7 +1352,7 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       d1.push({ target: j.endpoint, callData: SEL.getReceiveLibrary + padAddr(j.peer) + padU32(chain.eid) });
       d1.push({ target: j.peer, callData: SEL.peers + padU32(chain.eid) });
     }
-    const d1res = await batchOnClient(dstClient, hasMc, ref.chainKey, d1);
+    const d1res = await batchOnClient(dstClient, hasMc, ref.chainKey, "dst", d1);
 
     const needConfig: { job: DstJob; recvLib: string }[] = [];
     jobs.forEach((j, i) => {
@@ -1363,7 +1396,7 @@ export async function readSnapshot(oft: string, chain: ChainRef, deps: ReadSnaps
       target: job.endpoint,
       callData: SEL.getConfig + padAddr(job.peer) + padAddr(recvLib) + padU32(chain.eid) + padU32(2),
     }));
-    const d2res = await batchOnClient(dstClient, hasMc, ref.chainKey, d2);
+    const d2res = await batchOnClient(dstClient, hasMc, ref.chainKey, "dst", d2);
     needConfig.forEach(({ job }, i) => {
       const raw = d2res[i];
       if (raw) { try { job.route.receiveUln = decodeUlnConfig(raw); } catch { /* null */ } }

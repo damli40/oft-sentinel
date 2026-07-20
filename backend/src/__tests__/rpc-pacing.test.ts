@@ -138,6 +138,43 @@ describe("resilientBatch pacing", () => {
   });
 });
 
+// Neither zero-sleep test above exercises the cross-check's own batch client:
+// both use a single-RPC chainRef, so secondaryClient is null and the
+// rpcConflict cross-check (batchOnClient against the SECOND provider, see
+// lz-config.ts) never fires. That leaves the real production shape —
+// healthy fleet, two-provider chain, cross-check actually running — unpaced
+// in behavior but UNASSERTED, so pacing could leak onto this happy path
+// unseen. This closes that gap.
+describe("cross-check batch pacing", () => {
+  it("requests ZERO sleeps on a healthy two-provider chain where the cross-check runs", async () => {
+    const log: string[] = [];
+    const spy = sleepSpy();
+    const { handler } = fullHandler();
+    const factory = makeFactory(
+      {
+        p0: { handler: multicallHandler(handler) },
+        p1: { handler: multicallHandler(handler) },
+      },
+      log,
+    );
+    const chain = chainRef(
+      [{ url: "p0", provider: "official" }, { url: "p1", provider: "drpc" }],
+      { multicall3: true },
+    );
+
+    await readSnapshot(OFT, chain, deps({
+      makeClient: factory, sleep: spy.sleep, jitter: () => 0.5,
+    }));
+
+    // Confirms the cross-check batch actually ran against the secondary —
+    // else this would pass vacuously, the same way a single-RPC fixture would.
+    expect(log).toContain(`p1|${AGG3_SEL}`);
+    // Nothing here failed, so nothing should have paced — the cross-check's
+    // happy path must be as free as resilientBatch's.
+    expect(spy.ms).toEqual([]);
+  });
+});
+
 // House pattern from multicall.test.ts's "env configuration" describe block:
 // default, override, fail-loudly-at-import per bad value, blank-string
 // fallback, cap. `vi.resetModules()` + a dynamic import gets a fresh module

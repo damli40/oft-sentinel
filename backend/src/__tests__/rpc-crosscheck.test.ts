@@ -164,4 +164,71 @@ describe("rpcConflict cross-check — batched, on the SECOND provider", () => {
     expect(routeB?.uln).toBeNull();
     expect(routeB?.rpcConflict).toBeFalsy();
   });
+
+  it("maps xcheckResults back to the right eid when TWO corridors both qualify (MUST-FIX 1)", async () => {
+    // The test above proves the filter excludes an unqualified corridor
+    // correctly, but it can never catch an eid↔result index swap: EID_B is
+    // filtered out of xcheckRoutes there, so xcheckRoutes has length 1 and
+    // `xcheckResults[xcheckRoutes.length - 1 - i]` is the identity on a
+    // single-element array. Only a fixture where BOTH corridors survive the
+    // `.filter((r) => r.sendLibrary && r.uln)` gives xcheckRoutes length 2,
+    // where a swapped index is actually observable.
+    //
+    // EID_B is deliberately SMALLER than ETH_EID — see the previous test's
+    // comment on ascending numeric key enumeration — which fixes routeList
+    // (and therefore xcheckRoutes) order as [EID_B, ETH_EID]. That makes
+    // `xcheckResults[xcheckRoutes.length - 1 - i]` a genuine 2-element swap:
+    // EID_B (i=0) reads ETH_EID's secondary answer and vice versa.
+    const EID_B = 100;
+    const twoEidMap = async () => ({
+      [ETH_EID]: { chainKey: "ethereum", endpoint: ENDPOINT },
+      [EID_B]: { chainKey: `chain-${EID_B}`, endpoint: ENDPOINT },
+    });
+
+    // Primary agrees with itself everywhere: every corridor reads ulnZero, so
+    // BOTH corridors fully resolve a send library and a ULN and qualify for
+    // the cross-check.
+    const primaryHandler = fullHandler(ulnZero).handler;
+
+    // Secondary AGREES with the primary on ETH_EID (also ulnZero) and DIFFERS
+    // on EID_B (ulnDiff). getConfig is the only selector the cross-check batch
+    // asks the secondary, so it's the only one that needs to vary by eid.
+    const secondaryHandler: Handler = (to, data) => {
+      if (data.slice(0, 10) === SEL.getConfig) {
+        const eid = parseInt(data.slice(138, 202), 16);
+        return eid === EID_B
+          ? fullHandler(ulnDiff).handler(to, data)
+          : fullHandler(ulnZero).handler(to, data);
+      }
+      return fullHandler(ulnZero).handler(to, data);
+    };
+
+    const log: string[] = [];
+    const factory = makeFactory(
+      {
+        p0: { handler: multicallHandler(primaryHandler) },
+        p1: { handler: multicallHandler(secondaryHandler) },
+      },
+      log,
+    );
+    const chain = chainRef(
+      [{ url: "p0", provider: "official" }, { url: "p1", provider: "drpc" }],
+      { multicall3: true },
+    );
+
+    const snap = await readSnapshot(
+      OFT, chain,
+      deps({ makeClient: factory, loadEidMap: twoEidMap }),
+    );
+
+    const routeA = snap.routes.find((r) => r.eid === ETH_EID); // secondary AGREED
+    const routeB = snap.routes.find((r) => r.eid === EID_B);   // secondary DIFFERED
+
+    // Both directions matter — a swapped mapping manufactures a false CRITICAL
+    // on the route that actually agreed (A) AND suppresses the real one on the
+    // route that actually disagreed (B). Asserting only one side would still
+    // pass against a mutant that happens to get the other side right.
+    expect(routeA?.rpcConflict).toBeFalsy();
+    expect(routeB?.rpcConflict).toBe(true);
+  });
 });
