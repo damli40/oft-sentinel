@@ -181,7 +181,10 @@ describe("POST /api/sentinel/validate", () => {
       const challenge = JSON.parse(Buffer.from(header!, "base64").toString());
       expect(challenge.x402Version).toBe(2);
       expect(challenge.accepts).toHaveLength(1);
-      expect(challenge.accepts[0]).toMatchObject({ scheme: "exact", network: "eip155:196", amount: "0" });
+      // 0.01 USDT at 6 decimals. A zero amount is valid x402 but OKX's buyer-side
+      // task-402-pay cannot convert "0 USDT" to minimal units (their Jul 21 report),
+      // so the listed fee and this challenge both carry 0.01.
+      expect(challenge.accepts[0]).toMatchObject({ scheme: "exact", network: "eip155:196", amount: "10000" });
     }
   });
 
