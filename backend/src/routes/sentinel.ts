@@ -210,7 +210,12 @@ const VALIDATE_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 // OKX's escrow probes this endpoint expecting an HTTP 402 challenge even at
 // fee 0 — without one it falls back to direct-accept and the task dies waiting
 // for a result that x402 would have taken from the HTTP response itself. The
-// challenge advertises the listed terms of agent #6455: 0 USDT on X Layer.
+// challenge advertises the listed terms of agent #6455: 0.01 USDT on X Layer.
+// The fee is nonzero because OKX's buyer-side task-402-pay cannot convert a
+// zero amount to minimal units ("expected 0 USDT ≈ ?", their Jul 21 report) —
+// a zero-amount challenge passes their x402-check but fails every real paid
+// replay. This amount MUST match the listed service fee or the buyer's
+// amount check rejects the challenge.
 // Requests carrying an x402 payment header, or any request with a snapshot
 // body, still get the verdict; only unpaid snapshot-less requests see the 402.
 const X402_RESOURCE_URL =
@@ -232,7 +237,7 @@ const X402_CHALLENGE = Buffer.from(
         // OKX's x402-check can't resolve this asset's decimals from its own
         // token list and asks for a `decimals` field in the accepts entry.
         decimals: 6,
-        amount: "0",
+        amount: "10000", // 0.01 USDT — keep in lockstep with the listed service fee
         payTo: "0xd2e640e2ff4d9693f1c8000bbcc10a8de76c0e7d", // agent #6455 owner wallet
         maxTimeoutSeconds: 60,
         extra: { assetSymbol: "USDT", assetDecimals: 6, assetTransferMethod: "eip3009", name: "USD₮0", version: "1" },
