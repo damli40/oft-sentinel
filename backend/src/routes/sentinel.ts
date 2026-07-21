@@ -229,6 +229,9 @@ const X402_CHALLENGE = Buffer.from(
         scheme: "exact",
         network: "eip155:196",
         asset: "0x779ded0c9e1022225f8e0630b35a9b54be713736", // USDT (USD₮0) on X Layer
+        // OKX's x402-check can't resolve this asset's decimals from its own
+        // token list and asks for a `decimals` field in the accepts entry.
+        decimals: 6,
         amount: "0",
         payTo: "0xd2e640e2ff4d9693f1c8000bbcc10a8de76c0e7d", // agent #6455 owner wallet
         maxTimeoutSeconds: 60,
