@@ -184,7 +184,10 @@ describe("POST /api/sentinel/validate", () => {
       // 0.01 USDT at 6 decimals. A zero amount is valid x402 but OKX's buyer-side
       // task-402-pay cannot convert "0 USDT" to minimal units (their Jul 21 report),
       // so the listed fee and this challenge both carry 0.01.
-      expect(challenge.accepts[0]).toMatchObject({ scheme: "exact", network: "eip155:196", amount: "10000" });
+      // maxTimeoutSeconds 300 matches the canonical example in OKX's A2MCP guide
+      // (dev-docs/okxai/howtomcp) — the buyer's signature validity window derives
+      // from it, and their round-1 report flagged tight timeout budgets.
+      expect(challenge.accepts[0]).toMatchObject({ scheme: "exact", network: "eip155:196", amount: "10000", maxTimeoutSeconds: 300 });
     }
   });
 
