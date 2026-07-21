@@ -191,6 +191,18 @@ describe("POST /api/sentinel/validate", () => {
     }
   });
 
+  // Caught by the live buyer-flow self-test (Jul 21): the OKX CLI replays with
+  // the same method it probed with — GET — and the old GET route challenged
+  // unconditionally, so a paying buyer was 402'd forever ("facilitator
+  // non-terminal: HTTP 402"). A paid GET must serve a deliverable.
+  it("serves a paid GET replay a deliverable, not another challenge", async () => {
+    const res = await fetch(base, { headers: { "payment-signature": "signed-by-okx-escrow" } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.incomplete).toBe(true);
+    expect(body.message).toMatch(/config/i);
+  });
+
   it("serves a paid replay; a paid replay with no config gets a usable explanation", async () => {
     const paid = (body: unknown) =>
       fetch(base, {
