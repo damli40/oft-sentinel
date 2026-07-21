@@ -206,11 +206,58 @@ const VALIDATE_MAX_ROUTES = 30;
 const VALIDATE_CUSTODY_TYPES = new Set(["eoa_hot", "fireblocks_mpc", "safe_multisig", "unknown"]);
 const VALIDATE_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
+// ── x402 challenge (OKX Agent Payments Protocol) ─────────────────────────────
+// OKX's escrow probes this endpoint expecting an HTTP 402 challenge even at
+// fee 0 — without one it falls back to direct-accept and the task dies waiting
+// for a result that x402 would have taken from the HTTP response itself. The
+// challenge advertises the listed terms of agent #6455: 0 USDT on X Layer.
+// Requests carrying an x402 payment header, or any request with a snapshot
+// body, still get the verdict; only unpaid snapshot-less requests see the 402.
+const X402_RESOURCE_URL =
+  process.env.PUBLIC_VALIDATE_URL ?? "https://backend-production-d16e.up.railway.app/api/sentinel/validate";
+const X402_CHALLENGE = Buffer.from(
+  JSON.stringify({
+    x402Version: 2,
+    error: "Payment required",
+    resource: {
+      url: X402_RESOURCE_URL,
+      description: "OFT Config Validation — deterministic LayerZero OFT verdict with findings",
+      mimeType: "application/json",
+    },
+    accepts: [
+      {
+        scheme: "exact",
+        network: "eip155:196",
+        asset: "0x779ded0c9e1022225f8e0630b35a9b54be713736", // USDT (USD₮0) on X Layer
+        amount: "0",
+        payTo: "0xd2e640e2ff4d9693f1c8000bbcc10a8de76c0e7d", // agent #6455 owner wallet
+        maxTimeoutSeconds: 60,
+        extra: { assetSymbol: "USDT", assetDecimals: 6, assetTransferMethod: "eip3009", name: "USD₮0", version: "1" },
+      },
+    ],
+  }),
+).toString("base64");
+
+function sendX402Challenge(res: Response): void {
+  res.status(402).set("PAYMENT-REQUIRED", X402_CHALLENGE).json({
+    error: "Payment required",
+    hint: "POST { snapshot, ticker?, custodyDeclaration? } — a valid snapshot body or an x402 payment header unlocks the verdict",
+  });
+}
+
+// GET /api/sentinel/validate — x402 discovery probe (OKX checks GET first).
+router.get("/validate", (_req: Request, res: Response) => sendX402Challenge(res));
+
 router.post("/validate", async (req: Request, res: Response) => {
   const bad = (error: string) => res.status(400).json({ error });
   const body = req.body as Record<string, unknown> | undefined;
   const s = body?.snapshot as Record<string, unknown> | undefined;
   if (!s || typeof s !== "object") {
+    // Snapshot-less and unpaid = an x402 probe, not a malformed API call.
+    if (!req.headers["payment-signature"] && !req.headers["x-payment"]) {
+      sendX402Challenge(res);
+      return;
+    }
     bad("body must be { snapshot, ticker?, custodyDeclaration? }");
     return;
   }

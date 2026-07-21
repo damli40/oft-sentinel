@@ -120,7 +120,29 @@ describe("POST /api/sentinel/validate", () => {
   it("rejects a malformed snapshot with 400", async () => {
     expect((await post({ snapshot: { oft: "not-an-address", chainId: 5000, routes: [] } })).status).toBe(400);
     expect((await post({ snapshot: snapshot({ routes: "nope" }) })).status).toBe(400);
-    expect((await post({})).status).toBe(400);
+  });
+
+  it("answers unpaid snapshot-less requests with an x402 challenge", async () => {
+    for (const res of [await fetch(base), await post({})]) {
+      expect(res.status).toBe(402);
+      const header = res.headers.get("payment-required");
+      expect(header).toBeTruthy();
+      const challenge = JSON.parse(Buffer.from(header!, "base64").toString());
+      expect(challenge.x402Version).toBe(2);
+      expect(challenge.accepts).toHaveLength(1);
+      expect(challenge.accepts[0]).toMatchObject({ scheme: "exact", network: "eip155:196", amount: "0" });
+    }
+  });
+
+  it("serves a paid replay and still 400s a paid replay with no snapshot", async () => {
+    const paid = (body: unknown) =>
+      fetch(base, {
+        method: "POST",
+        headers: { "content-type": "application/json", "payment-signature": "signed-by-okx-escrow" },
+        body: JSON.stringify(body),
+      });
+    expect((await paid({ snapshot: snapshot() })).status).toBe(200);
+    expect((await paid({})).status).toBe(400);
   });
 
   it("is pure — validating does not create a verdict", async () => {
