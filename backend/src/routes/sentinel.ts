@@ -254,7 +254,18 @@ function sendX402Challenge(res: Response): void {
 }
 
 // GET /api/sentinel/validate — x402 discovery probe (OKX checks GET first).
-router.get("/validate", (_req: Request, res: Response) => sendX402Challenge(res));
+// A PAID GET must get a deliverable, never another challenge: the OKX buyer
+// CLI replays with the method it probed with (GET), and an unconditional 402
+// here strands the payment as "facilitator non-terminal" (caught live in the
+// Jul 21 buyer-flow self-test). The config itself can only ride a POST body,
+// so the paid-GET deliverable is the plain-language usage answer.
+router.get("/validate", (req: Request, res: Response) => {
+  if (req.headers["payment-signature"] || req.headers["x-payment"]) {
+    sendIncomplete(res, ["snapshot"], "Payment received. To get a verdict, POST the LayerZero config to check as JSON to this same URL: { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }], oft?, chainId? } }. Fields you leave out are treated as unknown — they are never scored against you.");
+    return;
+  }
+  sendX402Challenge(res);
+});
 
 // ── /validate input normalizer ──────────────────────────────────────────────
 // OKX's escrow re-test (Jul 21) paid the x402 challenge and then died one layer
