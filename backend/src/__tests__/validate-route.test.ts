@@ -117,9 +117,60 @@ describe("POST /api/sentinel/validate", () => {
     expect((await res.json()).error).toMatch(/routes/i);
   });
 
-  it("rejects a malformed snapshot with 400", async () => {
-    expect((await post({ snapshot: { oft: "not-an-address", chainId: 5000, routes: [] } })).status).toBe(400);
-    expect((await post({ snapshot: snapshot({ routes: "nope" }) })).status).toBe(400);
+  // OKX's escrow re-test (Jul 21): a buyer pastes the config a human actually
+  // holds — ticker, routes with chain names, DVNs, confirmations — and no
+  // contract address. That paste must produce a real verdict, not a 400.
+  it("scores a buyer paste with no OFT address — the OKX MYTKN shape", async () => {
+    const res = await post({
+      snapshot: {
+        token: "MYTKN",
+        routes: [{
+          chainName: "ethereum",
+          dvns: [REAL_DVN],
+          confirmations: 20,
+          libraries: { send: "0xB5320B0B3a13cC860893E2Bd79FCd7e13484Dda2", receive: "0x0000000000000000000000000000000000000001" },
+        }],
+      },
+      ticker: "MYTKN",
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.riskLevel).toBe("CRITICAL"); // 1-of-1 DVN still fires on the lifted ULN
+    expect(body.findings.some((f: { check: string }) => /oft address/i.test(f.check))).toBe(true);
+    const advisory = body.findings.find((f: { check: string }) => /oft address/i.test(f.check));
+    expect(advisory.severity).toBe("UNKNOWN");
+    expect(advisory.evidence).toBe("unverifiable");
+  });
+
+  it("resolves route chain names to eids and flags an unknown source chain", async () => {
+    const res = await post({
+      snapshot: { oft: OFT, routes: [route({ eid: undefined, chainName: "ethereum" })] },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.riskLevel).toBe("CRITICAL");
+    expect(body.findings.some((f: { check: string }) => /source chain/i.test(f.check))).toBe(true);
+  });
+
+  it("validates top-level dvns/confirmations as a single synthesized route", async () => {
+    const res = await post({ snapshot: { dvns: [REAL_DVN], confirmations: 20 } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.riskLevel).toBe("CRITICAL"); // 1-of-1
+    expect(body.findings.some((f: { check: string }) => /routes/i.test(f.check))).toBe(true);
+  });
+
+  it("answers an unscoreable config with a plain-language 200, never a raw 400", async () => {
+    for (const snap of [{}, { oft: "not-an-address", chainId: 5000, routes: [] }, snapshot({ routes: "nope" })]) {
+      const res = await post({ snapshot: snap });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.incomplete).toBe(true);
+      expect(body.riskLevel).toBeNull();
+      expect(body.message).toMatch(/routes/i);
+      expect(body.missing).toContain("routes");
+      expect(body.rulesVersion).toBe("4.1.0");
+    }
   });
 
   it("answers unpaid snapshot-less requests with an x402 challenge", async () => {
@@ -134,7 +185,7 @@ describe("POST /api/sentinel/validate", () => {
     }
   });
 
-  it("serves a paid replay and still 400s a paid replay with no snapshot", async () => {
+  it("serves a paid replay; a paid replay with no config gets a usable explanation", async () => {
     const paid = (body: unknown) =>
       fetch(base, {
         method: "POST",
@@ -142,7 +193,11 @@ describe("POST /api/sentinel/validate", () => {
         body: JSON.stringify(body),
       });
     expect((await paid({ snapshot: snapshot() })).status).toBe(200);
-    expect((await paid({})).status).toBe(400);
+    const empty = await paid({});
+    expect(empty.status).toBe(200);
+    const body = await empty.json();
+    expect(body.incomplete).toBe(true);
+    expect(body.message).toMatch(/config/i);
   });
 
   it("is pure — validating does not create a verdict", async () => {
