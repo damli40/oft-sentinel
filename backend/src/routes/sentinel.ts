@@ -239,7 +239,7 @@ const X402_CHALLENGE = Buffer.from(
         decimals: 6,
         amount: "10000", // 0.01 USDT — keep in lockstep with the listed service fee
         payTo: "0xd2e640e2ff4d9693f1c8000bbcc10a8de76c0e7d", // agent #6455 owner wallet
-        maxTimeoutSeconds: 60,
+        maxTimeoutSeconds: 300, // canonical value from OKX's A2MCP guide example
         extra: { assetSymbol: "USDT", assetDecimals: 6, assetTransferMethod: "eip3009", name: "USD₮0", version: "1" },
       },
     ],
