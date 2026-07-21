@@ -6,8 +6,8 @@ import { assessSnapshot, RULES_VERSION } from "../services/drift.js";
 import { generateReport } from "../services/report.js";
 import { askCopilot } from "../services/ask.js";
 import { loadDvnMeta, resolveDvn, dvnMetaHash, MetadataUnavailableError, type DvnMeta } from "../services/lz-config.js";
-import { getChainRef, chainDisplayName } from "../services/chain-registry.js";
-import type { CustodyDeclaration, OftSnapshot } from "../types.js";
+import { getChainRef, getChainRefByKey, chainDisplayName } from "../services/chain-registry.js";
+import type { CustodyDeclaration, Finding, OftSnapshot } from "../types.js";
 
 export const router = Router();
 
@@ -251,40 +251,97 @@ function sendX402Challenge(res: Response): void {
 // GET /api/sentinel/validate — x402 discovery probe (OKX checks GET first).
 router.get("/validate", (_req: Request, res: Response) => sendX402Challenge(res));
 
+// ── /validate input normalizer ──────────────────────────────────────────────
+// OKX's escrow re-test (Jul 21) paid the x402 challenge and then died one layer
+// deeper: buyers paste configs as humans hold them — ticker, routes with chain
+// names, DVN lists, confirmations, no contract address — and the old parser
+// hard-400'd anything without snapshot.oft. The engine never needed that gate:
+// /validate bypasses the custody store (the only consumer of snapshot.oft) and
+// treats every absent field as "unknown, never scored". The parser now matches
+// the engine's tolerance: identity fields are optional and their absence
+// becomes an UNVERIFIABLE advisory in the findings; routes may name their
+// destination chain instead of carrying an eid; flat dvns/confirmations lift
+// into the ULN shape. When nothing is scoreable at all the answer is still
+// HTTP 200 with a plain-language explanation, so an agent buyer always has a
+// deliverable for its user — never a raw 400.
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+function stringArray(...cands: unknown[]): string[] | null {
+  for (const c of cands) {
+    if (Array.isArray(c) && c.length > 0 && c.every((x) => typeof x === "string")) return c as string[];
+  }
+  return null;
+}
+
+function findAddress(s: Record<string, unknown>, keys: string[]): string | null {
+  for (const k of keys) {
+    const v = s[k];
+    if (typeof v === "string" && VALIDATE_ADDR_RE.test(v)) return v;
+  }
+  return null;
+}
+
+function sendIncomplete(res: Response, missing: string[], message: string): void {
+  res.json({ score: null, riskLevel: null, incomplete: true, missing, message, rulesVersion: RULES_VERSION });
+}
+
 router.post("/validate", async (req: Request, res: Response) => {
   const bad = (error: string) => res.status(400).json({ error });
-  const body = req.body as Record<string, unknown> | undefined;
-  const s = body?.snapshot as Record<string, unknown> | undefined;
-  if (!s || typeof s !== "object") {
+  const body = isObj(req.body) ? (req.body as Record<string, unknown>) : {};
+  const paid = Boolean(req.headers["payment-signature"] || req.headers["x-payment"]);
+  let s = isObj(body.snapshot) ? (body.snapshot as Record<string, unknown>) : null;
+  // Config pasted at the body root, without the { snapshot } wrapper.
+  if (!s && (Array.isArray(body.routes) || Array.isArray(body.dvns) || Array.isArray(body.requiredDVNs))) s = body;
+  if (!s) {
     // Snapshot-less and unpaid = an x402 probe, not a malformed API call.
-    if (!req.headers["payment-signature"] && !req.headers["x-payment"]) {
+    if (!paid) {
       sendX402Challenge(res);
       return;
     }
-    bad("body must be { snapshot, ticker?, custodyDeclaration? }");
+    sendIncomplete(res, ["snapshot"], "No config was provided. Send the LayerZero settings to check as JSON: { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }], oft?, chainId? } }. Fields you leave out are treated as unknown — they are never scored against you.");
     return;
   }
-  if (typeof s.oft !== "string" || !VALIDATE_ADDR_RE.test(s.oft)) {
-    bad("snapshot.oft must be a 0x-prefixed 40-hex address");
-    return;
+
+  const advisories: Finding[] = [];
+  const advise = (check: string, detail: string) =>
+    advisories.push({ severity: "UNKNOWN", evidence: "unverifiable", check, detail });
+
+  const oft = findAddress(s, ["oft", "address", "tokenAddress", "contractAddress", "contract", "token"]);
+  if (!oft) {
+    advise("Input: OFT address", "No OFT contract address was provided, so this verdict covers the pasted configuration only — it is not tied to any on-chain deployment. Include the token's 0x… contract address (snapshot.oft) to get a verdict that can be checked against live chain state.");
   }
-  if (typeof s.chainId !== "number" || !Number.isInteger(s.chainId)) {
-    bad("snapshot.chainId must be an integer chain id");
-    return;
-  }
-  if (!Array.isArray(s.routes)) {
-    bad("snapshot.routes must be an array");
-    return;
-  }
-  if (s.routes.length > VALIDATE_MAX_ROUTES) {
-    bad(`too many routes (${s.routes.length}) — max ${VALIDATE_MAX_ROUTES} per validation`);
-    return;
-  }
-  for (const r of s.routes) {
-    if (!r || typeof r !== "object" || typeof (r as Record<string, unknown>).eid !== "number") {
-      bad("every route needs at least a numeric eid");
-      return;
+
+  let chainId: number | null = typeof s.chainId === "number" && Number.isInteger(s.chainId) ? s.chainId : null;
+  if (chainId === null && typeof s.chainId === "string" && /^\d+$/.test(s.chainId)) chainId = parseInt(s.chainId, 10);
+  if (chainId === null) {
+    for (const k of ["chainKey", "chainName", "chain", "sourceChain"]) {
+      const v = s[k];
+      const ref = typeof v === "string" ? getChainRefByKey(v.trim().toLowerCase()) : null;
+      if (ref) {
+        chainId = ref.chainId;
+        break;
+      }
     }
+  }
+  if (chainId === null) {
+    advise("Input: source chain", 'The config did not say which chain it lives on. Structural checks (DVN quorum, confirmations, library pinning) still ran, but DVN addresses could not be resolved to named operators, so deprecation and self-DVN checks were skipped. Add chainId or a chain name like "ethereum".');
+  }
+
+  const topDvns = stringArray(s.dvns, s.requiredDVNs);
+  const topConf = typeof s.confirmations === "number" && Number.isInteger(s.confirmations) ? s.confirmations : null;
+  let rawRoutes: unknown[] = Array.isArray(s.routes) ? s.routes : [];
+  if (rawRoutes.length === 0 && (topDvns || topConf !== null)) {
+    rawRoutes = [{}];
+    advise("Input: routes", "No per-route breakdown was provided; the top-level DVN and confirmation settings were validated as a single route with an unknown destination. LayerZero security config is set per destination chain — send a routes array for a per-corridor verdict.");
+  }
+  const routeObjs = rawRoutes.filter(isObj);
+  if (routeObjs.length === 0) {
+    sendIncomplete(res, ["routes"], "Nothing to validate: the config contained no routes and no DVN settings. Send at least one route — { chainName (or eid), dvns: [...], confirmations } — or a full snapshot from a config read. Fields you leave out are treated as unknown, never scored against you.");
+    return;
+  }
+  if (routeObjs.length > VALIDATE_MAX_ROUTES) {
+    bad(`too many routes (${routeObjs.length}) — max ${VALIDATE_MAX_ROUTES} per validation`);
+    return;
   }
   let custody: CustodyDeclaration | null = null;
   const cd = body?.custodyDeclaration as Record<string, unknown> | undefined;
@@ -308,16 +365,51 @@ router.post("/validate", async (req: Request, res: Response) => {
     receiveLibIsDefault: null, uln: null, receiveUln: null, peer: null, peerAddress: null,
     hasEnforcedOptions: null, isActive: true,
   };
+  let unknownDest = 0;
+  const routes = routeObjs.map((r, i) => {
+    let eid = typeof r.eid === "number" && Number.isInteger(r.eid) ? r.eid : null;
+    const named = ["chainKey", "chainName", "chain", "to", "destination"]
+      .map((k) => r[k])
+      .find((v) => typeof v === "string" && v !== "") as string | undefined;
+    if (eid === null && named) eid = getChainRefByKey(named.trim().toLowerCase())?.eid ?? null;
+    if (eid === null) {
+      unknownDest++;
+      eid = 0; // 0 = destination not identified; structural checks still run
+    }
+    let uln = isObj(r.uln) ? (r.uln as Record<string, unknown>) : null;
+    if (uln && Array.isArray(uln.requiredDVNs) && typeof uln.requiredDVNCount !== "number") {
+      uln = { ...uln, requiredDVNCount: uln.requiredDVNs.length };
+    }
+    if (!uln) {
+      const dvns = stringArray(r.dvns, r.requiredDVNs) ?? topDvns;
+      const conf = typeof r.confirmations === "number" && Number.isInteger(r.confirmations) ? r.confirmations : topConf;
+      if (dvns) {
+        // confirmations 0 = "not asserted" in the engine's convention — never scored.
+        uln = { confirmations: conf ?? 0, requiredDVNCount: dvns.length, requiredDVNs: dvns, optionalDVNCount: 0, optionalDVNThreshold: 0, optionalDVNs: [] };
+      }
+    }
+    const libs = isObj(r.libraries) ? (r.libraries as Record<string, unknown>) : null;
+    return {
+      ...routeDefaults,
+      ...r,
+      eid,
+      uln,
+      sendLibrary: typeof r.sendLibrary === "string" ? r.sendLibrary : typeof libs?.send === "string" ? libs.send : null,
+      receiveLibrary: typeof r.receiveLibrary === "string" ? r.receiveLibrary : typeof libs?.receive === "string" ? libs.receive : null,
+      chainName: typeof r.chainName === "string" && r.chainName !== "" ? r.chainName : named ?? (eid !== 0 ? `eid-${eid}` : `route-${i + 1}`),
+    };
+  });
+  if (unknownDest > 0) {
+    advise("Input: destination chains", `${unknownDest} route${unknownDest > 1 ? "s" : ""} did not name a destination this service recognizes. Their DVN and confirmation settings were still checked structurally, but cross-referencing against known chain deployments was skipped. Use a LayerZero eid or a chain name like "ethereum".`);
+  }
   const snapshot = {
     owner: null, ownerIsContract: null, proxyAdmin: null, proxyAdminOwner: null,
     proxyAdminIsMultisig: null, proxyAdminOwnerIsContract: null,
     ...s,
+    oft,
+    chainId: chainId ?? 0,
     capturedAt: typeof s.capturedAt === "number" ? s.capturedAt : Date.now(),
-    routes: (s.routes as Array<Record<string, unknown>>).map((r) => ({
-      ...routeDefaults,
-      ...r,
-      chainName: typeof r.chainName === "string" && r.chainName !== "" ? r.chainName : `eid-${r.eid}`,
-    })),
+    routes,
   } as unknown as OftSnapshot;
   try {
     const { findings, score, riskLevel, tis } = await assessSnapshot(
@@ -325,7 +417,7 @@ router.post("/validate", async (req: Request, res: Response) => {
       typeof body?.ticker === "string" ? body.ticker : undefined,
       custody,
     );
-    res.json({ score, riskLevel, findings, tis, rulesVersion: RULES_VERSION });
+    res.json({ score, riskLevel, findings: [...findings, ...advisories], tis, rulesVersion: RULES_VERSION });
   } catch (e: any) {
     if (e instanceof MetadataUnavailableError) {
       res.status(503).json({ error: "DVN metadata unavailable — try again shortly" });
