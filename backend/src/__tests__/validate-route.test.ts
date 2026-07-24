@@ -207,6 +207,27 @@ describe("POST /api/sentinel/validate", () => {
     }
   });
 
+  // Caught by the live paid self-test (Jul 24, round 5): the payment settled but
+  // the deliverable was the usage hint, not a verdict. Buyer CLIs only attach
+  // parameters the seller DECLARES — they never invent a request shape — so an
+  // undeclared input schema means the paid replay carries an empty body and the
+  // buyer pays for a hint. The challenge must declare the ticker body itself.
+  it("declares the paid request shape so a buyer CLI can attach the ticker", async () => {
+    const header = (await post({})).headers.get("payment-required");
+    const { accepts } = JSON.parse(Buffer.from(header!, "base64").toString());
+    const input = accepts[0].outputSchema?.input;
+    expect(input).toBeTruthy();
+    expect(input.type).toBe("http");
+    expect(input.method).toBe("POST");
+    expect(input.bodyType).toBe("json");
+    // ticker is REQUIRED in the declaration: an optional param the buyer did not
+    // supply is dropped by the CLI, which is exactly how round 5 produced an
+    // empty body. Required means the CLI collects it before paying.
+    expect(input.body.required).toContain("ticker");
+    expect(input.body.properties.ticker.type).toBe("string");
+    expect(Object.keys(input.body.properties)).toContain("chainId");
+  });
+
   // Caught by the live buyer-flow self-test (Jul 21): the OKX CLI replays with
   // the same method it probed with — GET — and the old GET route challenged
   // unconditionally, so a paying buyer was 402'd forever ("facilitator

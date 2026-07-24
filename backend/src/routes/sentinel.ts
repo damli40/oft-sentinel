@@ -218,6 +218,12 @@ const VALIDATE_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 // amount check rejects the challenge.
 // Requests carrying an x402 payment header, or any request with a snapshot
 // body, still get the verdict; only unpaid snapshot-less requests see the 402.
+// The accepts entry declares its own input shape (`outputSchema.input`): buyer
+// CLIs attach only parameters the seller declares and never invent a request
+// body, so without it a paid replay arrives empty and the buyer pays for the
+// usage hint instead of a verdict (caught in the Jul 24 paid self-test).
+// `ticker` is required rather than optional because an unsupplied optional
+// param is dropped by the buyer — required makes the CLI collect it first.
 const X402_RESOURCE_URL =
   process.env.PUBLIC_VALIDATE_URL ?? "https://backend-production-d16e.up.railway.app/api/sentinel/validate";
 const X402_CHALLENGE = Buffer.from(
@@ -241,6 +247,27 @@ const X402_CHALLENGE = Buffer.from(
         payTo: "0xd2e640e2ff4d9693f1c8000bbcc10a8de76c0e7d", // agent #6455 owner wallet
         maxTimeoutSeconds: 300, // canonical value from OKX's A2MCP guide example
         extra: { assetSymbol: "USDT", assetDecimals: 6, assetTransferMethod: "eip3009", name: "USD₮0", version: "1" },
+        outputSchema: {
+          input: {
+            type: "http",
+            method: "POST",
+            bodyType: "json",
+            body: {
+              type: "object",
+              required: ["ticker"],
+              properties: {
+                ticker: {
+                  type: "string",
+                  description: "Token symbol to check, e.g. USDe. Returns the latest verdict for every monitored chain it is deployed on.",
+                },
+                chainId: {
+                  type: "integer",
+                  description: "Optional. Narrows a multi-chain token to one chain, e.g. 5000 for Mantle.",
+                },
+              },
+            },
+          },
+        },
       },
     ],
   }),
