@@ -232,7 +232,12 @@ const X402_CHALLENGE = Buffer.from(
     error: "Payment required",
     resource: {
       url: X402_RESOURCE_URL,
-      description: "OFT Config Validation — deterministic LayerZero OFT verdict with findings",
+      // OKX specs no machine-readable input schema anywhere (the A2MCP guide's
+      // challenge has no schema field; ASP registration takes only name /
+      // description / price / endpoint), so this prose IS the interface
+      // contract a buying agent reads before composing its request.
+      description:
+        "OFT Config Validation — deterministic LayerZero OFT verdict with findings. POST { \"ticker\": \"USDe\" } for a monitored token's latest verdict on every chain it runs on (add \"chainId\" to narrow), or POST { \"snapshot\": { \"routes\": [...] } } to score a config directly. An empty body returns the whole monitored fleet.",
       mimeType: "application/json",
     },
     accepts: [
@@ -286,9 +291,14 @@ function sendX402Challenge(res: Response): void {
 // here strands the payment as "facilitator non-terminal" (caught live in the
 // Jul 21 buyer-flow self-test). The config itself can only ride a POST body,
 // so the paid-GET deliverable is the plain-language usage answer.
-router.get("/validate", (req: Request, res: Response) => {
+router.get("/validate", async (req: Request, res: Response) => {
   if (req.headers["payment-signature"] || req.headers["x-payment"]) {
-    sendIncomplete(res, ["snapshot"], "Payment received. To get a verdict, POST the LayerZero config to check as JSON to this same URL: { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }], oft?, chainId? } }. Fields you leave out are treated as unknown — they are never scored against you.");
+    // A GET carries no body, so it can never name an asset — serve the fleet.
+    try {
+      await sendFleetCache(res);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
     return;
   }
   sendX402Challenge(res);
@@ -336,6 +346,28 @@ function sendIncomplete(res: Response, missing: string[], message: string): void
 // would blow the 300s payment window.
 const TICKER_STALE_MS = 2 * 3_600_000; // poller missed at least one hourly cycle
 
+async function cachedResult(w: { ticker: string; address: string; chainId: number }): Promise<Record<string, unknown>> {
+  const snap = getSnapshot(w.address, w.chainId);
+  if (!snap) {
+    return { ticker: w.ticker, chainId: w.chainId, oft: w.address, incomplete: true, message: "This token is monitored but not yet polled — try again shortly." };
+  }
+  const { findings, score, riskLevel, tis } = await assessSnapshot(snap, w.ticker, null);
+  const ageMs = Date.now() - snap.capturedAt;
+  const stale = ageMs > TICKER_STALE_MS;
+  const out: Finding[] = [...findings];
+  // A silent stale PASS on a config-drift tool is the one failure mode that
+  // can't ship — staleness is always surfaced, never withheld.
+  if (stale) {
+    out.push({
+      severity: "UNKNOWN",
+      evidence: "unverifiable",
+      check: "Verdict freshness",
+      detail: `This verdict was captured ${Math.round(ageMs / 3_600_000)} hours ago from the last poll; the live config may have changed since. Re-check if freshness matters.`,
+    });
+  }
+  return { ticker: w.ticker, chainId: w.chainId, oft: w.address, score, riskLevel, findings: out, tis, rulesVersion: RULES_VERSION, asOf: snap.capturedAt, ageMs, stale };
+}
+
 async function lookupTickerCache(res: Response, ticker: string, chainId: number | null): Promise<void> {
   const watched = await getWatched();
   const t = ticker.toLowerCase();
@@ -344,30 +376,24 @@ async function lookupTickerCache(res: Response, ticker: string, chainId: number 
     sendIncomplete(res, ["ticker"], `"${ticker}" is not on the monitored watchlist, so there is no cached verdict for it. Send the LayerZero config itself as JSON — { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }] } } — for a direct verdict.`);
     return;
   }
-  const results = [];
-  for (const w of matches) {
-    const snap = getSnapshot(w.address, w.chainId);
-    if (!snap) {
-      results.push({ chainId: w.chainId, oft: w.address, incomplete: true, message: "This token is monitored but not yet polled — try again shortly." });
-      continue;
-    }
-    const { findings, score, riskLevel, tis } = await assessSnapshot(snap, w.ticker, null);
-    const ageMs = Date.now() - snap.capturedAt;
-    const stale = ageMs > TICKER_STALE_MS;
-    const out: Finding[] = [...findings];
-    // A silent stale PASS on a config-drift tool is the one failure mode that
-    // can't ship — staleness is always surfaced, never withheld.
-    if (stale) {
-      out.push({
-        severity: "UNKNOWN",
-        evidence: "unverifiable",
-        check: "Verdict freshness",
-        detail: `This verdict was captured ${Math.round(ageMs / 3_600_000)} hours ago from the last poll; the live config may have changed since. Re-check if freshness matters.`,
-      });
-    }
-    results.push({ chainId: w.chainId, oft: w.address, score, riskLevel, findings: out, tis, rulesVersion: RULES_VERSION, asOf: snap.capturedAt, ageMs, stale });
-  }
-  res.json({ ticker, source: "cache", results });
+  res.json({ ticker, source: "cache", results: await Promise.all(matches.map(cachedResult)) });
+}
+
+// A buyer who paid without naming an asset must never get a usage hint for
+// their money. OKX's spec carries no machine-readable input schema — the A2MCP
+// guide's challenge has no schema field and ASP registration takes only name /
+// description / price / endpoint, so the buying agent composes the request from
+// prose and some buyers will always arrive with an empty body. The widest
+// honest answer to "what do you know?" is the whole monitored fleet; it is the
+// same data /status already serves publicly, so nothing new is disclosed.
+async function sendFleetCache(res: Response): Promise<void> {
+  const watched = await getWatched();
+  res.json({
+    source: "cache",
+    scope: "fleet",
+    message: "No asset was named, so this is every OFT currently monitored, with its latest verdict. To check one, POST { ticker: \"USDe\" } — add chainId to narrow a multi-chain token. To score a config that is not monitored, POST { snapshot: { routes: [...] } }.",
+    results: await Promise.all(watched.map(cachedResult)),
+  });
 }
 
 router.post("/validate", async (req: Request, res: Response) => {
@@ -399,7 +425,12 @@ router.post("/validate", async (req: Request, res: Response) => {
       }
       return;
     }
-    sendIncomplete(res, ["snapshot"], "No config was provided. Send the LayerZero settings to check as JSON: { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }], oft?, chainId? } }. Fields you leave out are treated as unknown — they are never scored against you.");
+    // Paid, but nothing named: answer with the whole fleet rather than a hint.
+    try {
+      await sendFleetCache(res);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
     return;
   }
 
