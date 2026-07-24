@@ -228,19 +228,33 @@ describe("POST /api/sentinel/validate", () => {
     expect(Object.keys(input.body.properties)).toContain("chainId");
   });
 
+  // OKX's spec carries no machine-readable input schema (A2MCP Guide's
+  // challenge has no schema field; ASP registration takes only name /
+  // description / price / endpoint), so the description IS the interface
+  // contract — it is what a buying agent reads to compose the request.
+  it("states the request shape in the description, the only channel OKX specs", async () => {
+    const header = (await post({})).headers.get("payment-required");
+    const { resource } = JSON.parse(Buffer.from(header!, "base64").toString());
+    expect(resource.description).toMatch(/ticker/i);
+    expect(resource.description).toMatch(/POST/);
+  });
+
   // Caught by the live buyer-flow self-test (Jul 21): the OKX CLI replays with
   // the same method it probed with — GET — and the old GET route challenged
   // unconditionally, so a paying buyer was 402'd forever ("facilitator
   // non-terminal: HTTP 402"). A paid GET must serve a deliverable.
+  // A paid GET carries no body, so it cannot name an asset — it still must not
+  // cost a cent for a usage hint. The fleet answer is the deliverable.
   it("serves a paid GET replay a deliverable, not another challenge", async () => {
     const res = await fetch(base, { headers: { "payment-signature": "signed-by-okx-escrow" } });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.incomplete).toBe(true);
-    expect(body.message).toMatch(/config/i);
+    expect(body.scope).toBe("fleet");
+    expect(Array.isArray(body.results)).toBe(true);
+    expect(body.message).toMatch(/ticker/i);
   });
 
-  it("serves a paid replay; a paid replay with no config gets a usable explanation", async () => {
+  it("serves a paid replay; a paid replay with no config still answers with the fleet", async () => {
     const paid = (body: unknown) =>
       fetch(base, {
         method: "POST",
@@ -251,8 +265,8 @@ describe("POST /api/sentinel/validate", () => {
     const empty = await paid({});
     expect(empty.status).toBe(200);
     const body = await empty.json();
-    expect(body.incomplete).toBe(true);
-    expect(body.message).toMatch(/config/i);
+    expect(body.scope).toBe("fleet");
+    expect(body.incomplete).toBeUndefined();
   });
 
   it("is pure — validating does not create a verdict", async () => {
@@ -352,5 +366,42 @@ describe("POST /api/sentinel/validate — paid ticker cache lookup", () => {
     const res = await post({ ticker: "PUFF" });
     expect(res.status).toBe(402);
     expect(res.headers.get("payment-required")).toBeTruthy();
+  });
+
+  // OKX's spec (A2MCP Guide + ASP Registration, checked Jul 24) has no
+  // machine-readable input schema — a buying agent reads the description and
+  // builds the request itself, so some buyers will always pay with an empty
+  // body. Nobody may pay a cent for a usage hint: an empty paid body returns
+  // the whole monitored fleet, which is the widest honest answer to "what do
+  // you know?" (the same data /status already serves publicly and free).
+  it("serves a paid empty body the whole fleet, never a bare usage hint", async () => {
+    const res = await paidPost({});
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.source).toBe("cache");
+    expect(body.scope).toBe("fleet");
+    expect(body.results).toHaveLength(WATCHED.length);
+    expect(body.results.map((r: { ticker: string }) => r.ticker)).toEqual(WATCHED.map((w) => w.ticker));
+    const puff = body.results.find((r: { ticker: string }) => r.ticker === "PUFF");
+    expect(typeof puff.score).toBe("number"); // scored, not a hint
+    expect(puff.riskLevel).toBe("CRITICAL");
+    expect(puff.asOf).toBe(FRESH_AT);
+    // the never-polled and stale members stay honestly labelled in the fleet view
+    expect(body.results.find((r: { ticker: string }) => r.ticker === "COLD").incomplete).toBe(true);
+    const oldy = body.results.find((r: { ticker: string }) => r.ticker === "OLDY");
+    expect(oldy.stale).toBe(true);
+    expect(oldy.findings.some((f: { check: string }) => /freshness/i.test(f.check))).toBe(true);
+  });
+
+  it("tells a paid empty-body buyer how to narrow the answer", async () => {
+    const body = await (await paidPost({})).json();
+    expect(body.message).toMatch(/ticker/i);
+  });
+
+  it("keeps the fleet answer pure — no verdict is created", async () => {
+    const before = await (await fetch(base.replace("/validate", "/verdicts"))).json();
+    await paidPost({});
+    const after = await (await fetch(base.replace("/validate", "/verdicts"))).json();
+    expect(after.verdicts.length).toBe(before.verdicts.length);
   });
 });
