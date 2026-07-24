@@ -301,6 +301,48 @@ function sendIncomplete(res: Response, missing: string[], message: string): void
   res.json({ score: null, riskLevel: null, incomplete: true, missing, message, rulesVersion: RULES_VERSION });
 }
 
+// ── /validate ticker cache lookup ───────────────────────────────────────────
+// A paying buyer who already holds the full route/DVN snapshot has done the
+// hard part themselves — the listed promise of agent #6455 is address-in,
+// verdict-out. A paid { ticker } body answers from the watchlist's hourly-poll
+// cache. No live on-chain read on the request path: its ~900s worst-case tail
+// would blow the 300s payment window.
+const TICKER_STALE_MS = 2 * 3_600_000; // poller missed at least one hourly cycle
+
+async function lookupTickerCache(res: Response, ticker: string, chainId: number | null): Promise<void> {
+  const watched = await getWatched();
+  const t = ticker.toLowerCase();
+  const matches = watched.filter((w) => w.ticker.toLowerCase() === t && (chainId == null || w.chainId === chainId));
+  if (matches.length === 0) {
+    sendIncomplete(res, ["ticker"], `"${ticker}" is not on the monitored watchlist, so there is no cached verdict for it. Send the LayerZero config itself as JSON — { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }] } } — for a direct verdict.`);
+    return;
+  }
+  const results = [];
+  for (const w of matches) {
+    const snap = getSnapshot(w.address, w.chainId);
+    if (!snap) {
+      results.push({ chainId: w.chainId, oft: w.address, incomplete: true, message: "This token is monitored but not yet polled — try again shortly." });
+      continue;
+    }
+    const { findings, score, riskLevel, tis } = await assessSnapshot(snap, w.ticker, null);
+    const ageMs = Date.now() - snap.capturedAt;
+    const stale = ageMs > TICKER_STALE_MS;
+    const out: Finding[] = [...findings];
+    // A silent stale PASS on a config-drift tool is the one failure mode that
+    // can't ship — staleness is always surfaced, never withheld.
+    if (stale) {
+      out.push({
+        severity: "UNKNOWN",
+        evidence: "unverifiable",
+        check: "Verdict freshness",
+        detail: `This verdict was captured ${Math.round(ageMs / 3_600_000)} hours ago from the last poll; the live config may have changed since. Re-check if freshness matters.`,
+      });
+    }
+    results.push({ chainId: w.chainId, oft: w.address, score, riskLevel, findings: out, tis, rulesVersion: RULES_VERSION, asOf: snap.capturedAt, ageMs, stale });
+  }
+  res.json({ ticker, source: "cache", results });
+}
+
 router.post("/validate", async (req: Request, res: Response) => {
   const bad = (error: string) => res.status(400).json({ error });
   const body = isObj(req.body) ? (req.body as Record<string, unknown>) : {};
@@ -312,6 +354,22 @@ router.post("/validate", async (req: Request, res: Response) => {
     // Snapshot-less and unpaid = an x402 probe, not a malformed API call.
     if (!paid) {
       sendX402Challenge(res);
+      return;
+    }
+    // Paid and config-less but named a ticker → the cached verdict path.
+    const ticker = typeof body.ticker === "string" ? body.ticker.trim() : "";
+    if (ticker) {
+      let cid: number | null = typeof body.chainId === "number" && Number.isInteger(body.chainId) ? body.chainId : null;
+      if (cid === null && typeof body.chainId === "string" && /^\d+$/.test(body.chainId)) cid = parseInt(body.chainId, 10);
+      try {
+        await lookupTickerCache(res, ticker, cid);
+      } catch (e: any) {
+        if (e instanceof MetadataUnavailableError) {
+          res.status(503).json({ error: "DVN metadata unavailable — try again shortly" });
+          return;
+        }
+        res.status(500).json({ error: e.message });
+      }
       return;
     }
     sendIncomplete(res, ["snapshot"], "No config was provided. Send the LayerZero settings to check as JSON: { snapshot: { routes: [{ chainName or eid, dvns: [...], confirmations }], oft?, chainId? } }. Fields you leave out are treated as unknown — they are never scored against you.");
