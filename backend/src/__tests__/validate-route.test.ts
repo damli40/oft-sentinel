@@ -16,9 +16,25 @@ vi.mock("../services/lz-config.js", async (importActual) => {
   };
 });
 
+// getWatched() sources the watchlist from Dune (network) — stub only that with
+// a fixed fleet; the snapshot cache underneath it is the real store, seeded
+// below with putSnapshot.
+const WATCHED = vi.hoisted(() => [
+  { ticker: "PUFF", address: "0xaaaa000000000000000000000000000000000001", chainId: 5000 },
+  { ticker: "USDT0", address: "0xbbbb000000000000000000000000000000000002", chainId: 196 },
+  { ticker: "USDT0", address: "0xcccc000000000000000000000000000000000003", chainId: 1 },
+  { ticker: "COLD", address: "0xdddd000000000000000000000000000000000004", chainId: 5000 },
+  { ticker: "OLDY", address: "0xeeee000000000000000000000000000000000005", chainId: 5000 },
+]);
+vi.mock("../services/sentinel.js", async (importActual) => {
+  const actual = await importActual<typeof import("../services/sentinel.js")>();
+  return { ...actual, getWatched: vi.fn(async () => WATCHED) };
+});
+
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "validate-route-"));
 
 import { router } from "../routes/sentinel.js";
+import { putSnapshot } from "../services/snapshot-store.js";
 
 const REAL_DVN = "0x589dEDbD617e0CBcB916A9223F4d1300c294236b";
 const OFT = "0xabc1111111111111111111111111111111111111";
@@ -223,5 +239,97 @@ describe("POST /api/sentinel/validate", () => {
     await post({ snapshot: snapshot() });
     const after = await (await fetch(base.replace("/validate", "/verdicts"))).json();
     expect(after.verdicts.length).toBe(before.verdicts.length);
+  });
+});
+
+// A paying buyer who already holds the full config has done the hard part
+// themselves — the listed promise of agent #6455 is address-in, verdict-out.
+// A paid { ticker } body reads the watchlist's hourly-poll cache; no live
+// on-chain read on the request path (its ~900s worst-case tail would blow the
+// 300s payment window).
+describe("POST /api/sentinel/validate — paid ticker cache lookup", () => {
+  const FRESH_AT = Date.now() - 30 * 60_000; // half an hour: inside the hourly cycle
+  const STALE_AT = Date.now() - 3 * 3_600_000; // 3h: poller missed at least one cycle
+
+  beforeAll(() => {
+    // Seed the real snapshot store for every watched ticker except COLD
+    // (watched but never polled). The 1-of-1 DVN route scores CRITICAL.
+    putSnapshot(snapshot({ oft: WATCHED[0].address, chainId: 5000, capturedAt: FRESH_AT }) as never);
+    putSnapshot(snapshot({ oft: WATCHED[1].address, chainId: 196, capturedAt: FRESH_AT }) as never);
+    putSnapshot(snapshot({ oft: WATCHED[2].address, chainId: 1, capturedAt: FRESH_AT }) as never);
+    putSnapshot(snapshot({ oft: WATCHED[4].address, chainId: 5000, capturedAt: STALE_AT }) as never);
+  });
+
+  function paidPost(body: unknown) {
+    return fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json", "payment-signature": "signed-by-okx-escrow" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("serves a paid bare ticker a cached verdict — case-insensitive", async () => {
+    const res = await paidPost({ ticker: "puff" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.source).toBe("cache");
+    expect(body.results).toHaveLength(1);
+    const r = body.results[0];
+    expect(r.oft).toBe(WATCHED[0].address);
+    expect(r.chainId).toBe(5000);
+    expect(typeof r.score).toBe("number");
+    expect(r.riskLevel).toBe("CRITICAL"); // seeded 1-of-1 DVN shape
+    expect(r.rulesVersion).toBe("4.1.0");
+    expect(r.asOf).toBe(FRESH_AT);
+    expect(r.stale).toBe(false);
+    expect(r.findings.some((f: { check: string }) => /freshness/i.test(f.check))).toBe(false);
+  });
+
+  it("returns one result per chain for a multi-chain ticker", async () => {
+    const body = await (await paidPost({ ticker: "USDT0" })).json();
+    expect(body.results).toHaveLength(2);
+    expect(body.results.map((r: { chainId: number }) => r.chainId).sort()).toEqual([1, 196]);
+  });
+
+  it("narrows a multi-chain ticker with chainId", async () => {
+    const body = await (await paidPost({ ticker: "USDT0", chainId: 196 })).json();
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].chainId).toBe(196);
+    expect(body.results[0].oft).toBe(WATCHED[1].address);
+  });
+
+  it("answers an unknown ticker with a no-charge hint, not a score", async () => {
+    const res = await paidPost({ ticker: "NOPE" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.incomplete).toBe(true);
+    expect(body.missing).toContain("ticker");
+    expect(body.riskLevel).toBeNull();
+    expect(body.message).toMatch(/watchlist/i);
+  });
+
+  it("marks a watched-but-never-polled ticker incomplete per match", async () => {
+    const body = await (await paidPost({ ticker: "COLD" })).json();
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].incomplete).toBe(true);
+    expect(body.results[0].score).toBeUndefined();
+    expect(body.results[0].message).toMatch(/not yet polled/i);
+  });
+
+  it("surfaces a freshness advisory on a stale cached verdict", async () => {
+    const body = await (await paidPost({ ticker: "OLDY" })).json();
+    const r = body.results[0];
+    expect(r.stale).toBe(true);
+    expect(r.ageMs).toBeGreaterThan(2 * 3_600_000);
+    const advisory = r.findings.find((f: { check: string }) => /freshness/i.test(f.check));
+    expect(advisory).toBeTruthy();
+    expect(advisory.severity).toBe("UNKNOWN");
+    expect(advisory.evidence).toBe("unverifiable");
+  });
+
+  it("still answers an unpaid bare ticker with the x402 challenge", async () => {
+    const res = await post({ ticker: "PUFF" });
+    expect(res.status).toBe(402);
+    expect(res.headers.get("payment-required")).toBeTruthy();
   });
 });
